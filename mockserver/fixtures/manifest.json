@@ -1,0 +1,11 @@
+{
+  "atom_basic.xml": "47e47734ef90400116d97323f63a458f4f2f883aad1bf4aa28172adb5d346a36",
+  "atom_mixed_bad_items.xml": "734de31f9e48ef1869c79875d1e42801c5ae174009e16f71a800693126747b98",
+  "atom_updated.xml": "dc2edebba778775bcbb48719eae6b057b68c47efa52c617727e0cd425c9058a3",
+  "jsonfeed_basic.json": "8de56282888fe55fff9537dceb23cae774017ac150bd0a5b30ef303b7dc45919",
+  "jsonfeed_odd_values.json": "ecabf540ad9c91c9e680412d713c05c1bf42fc13ef9ae0f09f6a141d28a8e635",
+  "jsonfeed_updated.json": "e0f84e75a152de23d7623460dde9fc394b6a7a487b4064545f8d12eb485415e7",
+  "rss_basic.xml": "cbcb025c9c5b4bbe9a0ceecbee0d42078bcb519a6421eaed1201a2f85b08f06a",
+  "rss_malformed.xml": "a00bfdbb445933742086efa35755e8d4eacea6805c1932190f3fbd41cddd52f6",
+  "rss_updated.xml": "b409290ec54f25df4676281d72614834f7f2dc832ef94fe16f2da18b0ae87d90"
+}

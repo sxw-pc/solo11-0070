@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">
+  <channel>
+    <title>示例技术公告</title>
+    <link>http://127.0.0.1:8765/feeds/rss-basic.xml</link>
+    <description>feedkeep 合成 RSS 订阅源</description>
+    <item>
+      <title>示例公告一：发布窗口</title>
+      <link>http://127.0.0.1:8765/articles/rss-1</link>
+      <guid isPermaLink="false">urn:feedkeep:rss-basic:1</guid>
+      <pubDate>Mon, 01 Jan 2024 08:00:00 GMT</pubDate>
+      <description>第一条合成公告的摘要。</description>
+      <content:encoded><![CDATA[<p>正文一，仅用于离线测试。</p>]]></content:encoded>
+      <author>示例编辑甲</author>
+      <category>公告</category>
+      <enclosure url="http://127.0.0.1:8765/files/rss-1.pdf" type="application/pdf" length="1024" />
+    </item>
+    <item>
+      <title>示例公告二：维护说明</title>
+      <link>http://127.0.0.1:8765/articles/rss-2</link>
+      <guid isPermaLink="false">urn:feedkeep:rss-basic:2</guid>
+      <pubDate>Wed, 03 Jan 2024 09:30:00 GMT</pubDate>
+      <description>第二条合成公告的摘要。</description>
+      <enclosure url="http://127.0.0.1:8765/files/rss-2.txt" type="text/plain" length="128" />
+    </item>
+    <item>
+      <title>示例公告三：状态页</title>
+      <link>http://127.0.0.1:8765/articles/rss-3</link>
+      <guid isPermaLink="false">urn:feedkeep:rss-basic:3</guid>
+      <pubDate>Fri, 05 Jan 2024 12:00:00 GMT</pubDate>
+      <description>第三条合成公告的摘要。</description>
+    </item>
+  </channel>
+</rss>

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>示例 Atom 发布源</title>
+  <id>urn:feedkeep:atom-feed</id>
+  <updated>2024-01-07T12:00:00Z</updated>
+  <link rel="self" href="http://127.0.0.1:8765/feeds/atom-basic.xml" />
+  <entry>
+    <id>urn:feedkeep:atom:alpha</id>
+    <title>示例 Atom 条目甲</title>
+    <updated>2024-01-02T08:00:00Z</updated>
+    <published>2024-01-01T08:00:00Z</published>
+    <link rel="alternate" href="http://127.0.0.1:8765/articles/atom-alpha" />
+    <link rel="enclosure" href="http://127.0.0.1:8765/files/atom-alpha.pdf" type="application/pdf" length="2048" />
+    <author><name>示例编辑乙</name></author>
+    <category term="公告" />
+    <summary>Atom 摘要甲。</summary>
+    <content type="html">Atom 正文甲。</content>
+  </entry>
+  <entry>
+    <id>urn:feedkeep:atom:beta</id>
+    <title>示例 Atom 条目乙</title>
+    <updated>2024-01-03T10:30:00Z</updated>
+    <link href="http://127.0.0.1:8765/articles/atom-beta" />
+    <summary>Atom 摘要乙。</summary>
+  </entry>
+  <entry>
+    <id>urn:feedkeep:atom:gamma</id>
+    <title>示例 Atom 条目丙</title>
+    <updated>2024-01-05T12:00:00Z</updated>
+    <published>2024-01-04T12:00:00Z</published>
+    <link rel="alternate" href="http://127.0.0.1:8765/articles/atom-gamma" />
+    <summary>Atom 摘要丙。</summary>
+  </entry>
+</feed>

@@ -1,0 +1,44 @@
+version: 1
+feeds:
+  - id: rss-basic
+    name: 示例 RSS 基础源
+    url: http://127.0.0.1:8765/feeds/rss-basic.xml
+    format: auto
+    enabled: true
+    tags: [rss, demo]
+    note: 带 ETag 与 Last-Modified 的 RSS 2.0 合成源
+  - id: atom-basic
+    name: 示例 Atom 基础源
+    url: http://127.0.0.1:8765/feeds/atom-basic.xml
+    format: atom
+    enabled: true
+    tags: [atom, demo]
+    note: Atom 1.0 合成源，覆盖链接、作者与附件
+  - id: jsonfeed-basic
+    name: 示例 JSON Feed 基础源
+    url: http://127.0.0.1:8765/feeds/jsonfeed-basic.json
+    format: jsonfeed
+    enabled: true
+    tags: [jsonfeed, demo]
+    note: JSON Feed 1.1 合成源
+  - id: rss-updated
+    name: 示例 RSS 条件请求源
+    url: http://127.0.0.1:8765/feeds/rss-updated.xml
+    format: auto
+    enabled: true
+    tags: [rss, conditional]
+    note: 用于验证第二次抓取返回 304
+  - id: rss-malformed
+    name: 示例 RSS 故障源
+    url: http://127.0.0.1:8765/feeds/rss-malformed.xml
+    format: rss
+    enabled: true
+    tags: [rss, fault]
+    note: 故意返回损坏 XML，验证源级错误隔离
+  - id: atom-mixed
+    name: 示例 Atom 混合故障源
+    url: http://127.0.0.1:8765/feeds/atom-mixed.xml
+    format: atom
+    enabled: true
+    tags: [atom, fault]
+    note: 部分条目缺少 id 或时间，验证条目级错误隔离

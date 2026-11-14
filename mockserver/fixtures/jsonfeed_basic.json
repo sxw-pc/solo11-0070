@@ -1,0 +1,49 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "示例 JSON Feed 发布源",
+  "home_page_url": "http://127.0.0.1:8765/jsonfeed",
+  "feed_url": "http://127.0.0.1:8765/feeds/jsonfeed-basic.json",
+  "items": [
+    {
+      "id": "jf-1",
+      "url": "http://127.0.0.1:8765/articles/jf-1",
+      "title": "示例 JSON Feed 条目一",
+      "content_html": "<p>JSON Feed 正文一。</p>",
+      "summary": "JSON Feed 摘要一。",
+      "date_published": "2024-01-02T08:00:00+00:00",
+      "authors": [
+        {
+          "name": "示例编辑丙"
+        }
+      ],
+      "tags": [
+        "公告",
+        "jsonfeed"
+      ],
+      "attachments": [
+        {
+          "url": "http://127.0.0.1:8765/files/jf-1.pdf",
+          "mime_type": "application/pdf",
+          "size_in_bytes": 4096
+        }
+      ]
+    },
+    {
+      "id": "jf-2",
+      "url": "http://127.0.0.1:8765/articles/jf-2",
+      "title": "示例 JSON Feed 条目二",
+      "content_text": "JSON Feed 正文二。",
+      "date_published": "2024-01-04T09:00:00Z",
+      "tags": [
+        "状态"
+      ]
+    },
+    {
+      "id": "jf-3",
+      "url": "http://127.0.0.1:8765/articles/jf-3",
+      "title": "示例 JSON Feed 条目三",
+      "content_text": "JSON Feed 正文三。",
+      "date_published": "2024-01-06T09:00:00Z"
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>条目级故障隔离示例</title>
+  <id>urn:feedkeep:atom-mixed</id>
+  <updated>2024-01-10T00:00:00Z</updated>
+  <entry>
+    <id>urn:feedkeep:mixed:good-1</id><title>有效条目一</title>
+    <updated>2024-01-09T08:00:00Z</updated>
+    <link href="http://127.0.0.1:8765/articles/mixed-1" />
+  </entry>
+  <entry>
+    <title>缺少 id 的条目</title><updated>2024-01-09T09:00:00Z</updated>
+    <link href="http://127.0.0.1:8765/articles/mixed-bad-id" />
+  </entry>
+  <entry>
+    <id>urn:feedkeep:mixed:good-2</id><title>有效条目二</title>
+    <updated>2024-01-09T10:00:00Z</updated>
+    <link href="http://127.0.0.1:8765/articles/mixed-2" />
+  </entry>
+  <entry>
+    <id>urn:feedkeep:mixed:no-time</id><title>缺少时间的条目</title>
+    <link href="http://127.0.0.1:8765/articles/mixed-no-time" />
+  </entry>
+  <entry>
+    <id>urn:feedkeep:mixed:bad-time</id><title>时间无效的条目</title>
+    <updated>not-an-iso-date</updated>
+    <link href="http://127.0.0.1:8765/articles/mixed-bad-time" />
+  </entry>
+</feed>

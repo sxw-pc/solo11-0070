@@ -1,0 +1,45 @@
+{
+  "version": "https://jsonfeed.org/version/1.1",
+  "title": "奇值 JSON Feed",
+  "items": [
+    {
+      "id": 123,
+      "url": "http://127.0.0.1:8765/articles/odd-1",
+      "title": 456,
+      "date_published": "2024-01-11T00:00:00Z",
+      "attachments": [
+        {
+          "url": "http://127.0.0.1:8765/files/odd.bin",
+          "mime_type": null,
+          "size_in_bytes": "2048"
+        }
+      ]
+    },
+    {
+      "url": "http://127.0.0.1:8765/articles/odd-2",
+      "title": "无 id 但有链接",
+      "date_published": "2024-01-12T00:00:00Z"
+    },
+    {
+      "id": {
+        "bad": "object"
+      },
+      "title": "id 类型非法"
+    },
+    {
+      "id": "odd-bad-date",
+      "title": "日期非法",
+      "date_published": "not-a-date"
+    },
+    {
+      "title": "无 id 但可回退",
+      "date_published": "2024-01-13T00:00:00Z",
+      "attachments": [
+        {
+          "url": "javascript:alert(1)",
+          "size_in_bytes": 1
+        }
+      ]
+    }
+  ]
+}
