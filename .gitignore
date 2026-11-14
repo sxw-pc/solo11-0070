@@ -8,11 +8,13 @@ htmlcov/
 venv/
 build/
 dist/
-
 data/
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal
-
 reports/*
 !reports/.gitkeep
+node_modules/
+*.pyc
+.benchmarks/
+.env
