@@ -213,6 +213,25 @@ class RunCounts:
             "item_errors": self.item_errors,
         }
 
+    @classmethod
+    def from_source_runs(cls, records: Any, sources_total: int) -> "RunCounts":
+        """Recompute run totals from persisted source outcomes, never increments."""
+
+        counts = cls(sources_total=sources_total)
+        for record in records:
+            row = record.as_dict() if isinstance(record, SourceRunRecord) else dict(record)
+            status = row.get("status")
+            counts.sources_ok += int(status == "ok")
+            counts.sources_not_modified += int(status == "not_modified")
+            counts.sources_failed += int(status == "failed")
+            counts.items_seen += int(row.get("items_total") or 0)
+            counts.items_new += int(row.get("items_new") or 0)
+            counts.items_updated += int(row.get("items_updated") or 0)
+            counts.items_missing += int(row.get("items_missing") or 0)
+            counts.items_restored += int(row.get("items_restored") or 0)
+            counts.item_errors += int(row.get("item_errors") or 0)
+        return counts
+
 
 @dataclass(frozen=True)
 class SourceRunRecord:
@@ -261,6 +280,23 @@ class SourceRunRecord:
             "observed_at": self.observed_at,
         }
 
+    @classmethod
+    def from_row(cls, row: Mapping[str, Any]) -> "SourceRunRecord":
+        if not isinstance(row, Mapping):
+            row = dict(row)
+        values = {field: row.get(field) for field in SOURCE_RUN_FIELDS}
+        values["truncated"] = bool(values["truncated"])
+        return cls(**values)
+
+
+SOURCE_RUN_FIELDS = (
+    "source_id", "source_name", "status", "http_status", "duration_ms",
+    "body_bytes", "body_sha256", "etag", "last_modified", "attempts",
+    "items_total", "items_new", "items_updated", "items_missing",
+    "items_restored", "item_errors", "error_code", "error_message",
+    "truncated", "observed_at",
+)
+
 
 @dataclass(frozen=True)
 class RunSummary:
@@ -282,5 +318,32 @@ class RunSummary:
         }
         payload.update(self.counts.as_dict())
         payload["sources"] = [s.as_dict() for s in self.sources]
+        return payload
+
+
+@dataclass(frozen=True)
+class RecoveryOutcome:
+    """Result of resuming or finalizing an interrupted run."""
+
+    action: str
+    run_id: str  # the run written by this recovery
+    interrupted_run_id: Optional[str]
+    plan_changed: bool = False
+    reused_source_ids: tuple[str, ...] = ()
+    processed_source_ids: tuple[str, ...] = ()
+    summary: Optional[RunSummary] = None
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = {
+            "action": self.action,
+            "run_id": self.run_id,
+            "interrupted_run_id": self.interrupted_run_id,
+            "plan_changed": self.plan_changed,
+            "reused_sources": list(self.reused_source_ids),
+            "processed_sources": list(self.processed_source_ids),
+        }
+        if self.summary is not None:
+            payload["status"] = self.summary.status
+            payload["counts"] = self.summary.counts.as_dict()
         return payload
 

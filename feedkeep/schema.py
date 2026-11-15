@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -42,7 +42,17 @@ CREATE TABLE IF NOT EXISTS runs (
     items_updated INTEGER NOT NULL DEFAULT 0,
     items_missing INTEGER NOT NULL DEFAULT 0,
     items_restored INTEGER NOT NULL DEFAULT 0,
-    item_errors INTEGER NOT NULL DEFAULT 0
+    item_errors INTEGER NOT NULL DEFAULT 0,
+    snapshot_json TEXT,
+    fingerprint TEXT,
+    prior_run_id TEXT REFERENCES runs(id),
+    successor_run_id TEXT REFERENCES runs(id),
+    recovery_action TEXT,
+    recovery_at TEXT,
+    reused_sources_json TEXT,
+    processed_sources_json TEXT,
+    interrupted_at TEXT,
+    resume_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS source_runs (
@@ -68,6 +78,7 @@ CREATE TABLE IF NOT EXISTS source_runs (
     error_message TEXT,
     truncated INTEGER NOT NULL DEFAULT 0,
     observed_at TEXT NOT NULL,
+    record_digest TEXT,
     UNIQUE (run_id, source_id)
 );
 
@@ -130,8 +141,38 @@ CREATE INDEX IF NOT EXISTS idx_issues_run ON item_issues(run_id);
 """
 
 
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    """Add run-plan and recovery columns to a version-1 database in place."""
+
+    run_columns = {
+        "snapshot_json": "TEXT",
+        "fingerprint": "TEXT",
+        "prior_run_id": "TEXT REFERENCES runs(id)",
+        "successor_run_id": "TEXT REFERENCES runs(id)",
+        "recovery_action": "TEXT",
+        "recovery_at": "TEXT",
+        "reused_sources_json": "TEXT",
+        "processed_sources_json": "TEXT",
+        "interrupted_at": "TEXT",
+        "resume_count": "INTEGER NOT NULL DEFAULT 0",
+    }
+    existing_runs = _columns(conn, "runs")
+    for name, declaration in run_columns.items():
+        if name not in existing_runs:
+            conn.execute(f"ALTER TABLE runs ADD COLUMN {name} {declaration}")
+    if "record_digest" not in _columns(conn, "source_runs"):
+        conn.execute("ALTER TABLE source_runs ADD COLUMN record_digest TEXT")
+    conn.execute(
+        "UPDATE schema_meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),)
+    )
+
+
 def initialize(conn: sqlite3.Connection) -> None:
-    """Create tables once and reject databases from a newer schema."""
+    """Create tables once, migrate older schemas, reject newer ones."""
 
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -139,13 +180,16 @@ def initialize(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA synchronous = FULL")
     conn.executescript(SCHEMA_SQL)
     row = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    if row is None:
-        conn.execute(
-            "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)",
-            (str(SCHEMA_VERSION),),
-        )
-        conn.commit()
-    elif int(row["value"]) > SCHEMA_VERSION:
-        raise RuntimeError(
-            f"database schema {row['value']} is newer than supported {SCHEMA_VERSION}"
-        )
+    with conn:
+        if row is None:
+            conn.execute(
+                "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
+        elif int(row["value"]) < SCHEMA_VERSION:
+            if int(row["value"]) < 2:
+                _migrate_to_v2(conn)
+        elif int(row["value"]) > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"database schema {row['value']} is newer than supported {SCHEMA_VERSION}"
+            )

@@ -9,13 +9,17 @@ reports/fetch-report-run-000001.md
 
 默认选择最近一轮已完成 run；`--run-id run-000001` 可指定历史 run。没有已完成 run 时退出码为 2。
 
+`running` 轮次拒绝生成报告，错误信息会提示使用 `feedkeep recover`。`interrupted` 轮次可以用 `--run-id` 显式报告；它不会被默认选择，避免部分轮次悄悄成为“最近一次报告”。
+
 ## 1. JSON 顶层
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `schema_version` | int | 报告 schema 版本，当前为 1 |
+| `schema_version` | int | 报告 schema 版本，当前为 2 |
 | `generated_at` | string | 生成时刻，UTC 秒级 ISO-8601 |
 | `run` | object | 本轮汇总 |
+| `recovery` | object | 恢复操作元数据（见 §3） |
+| `progress` | object | 配置来源、已完成与未完成来源（见 §3） |
 | `sources` | array | 每个启用来源的本轮明细 |
 | `item_issues` | array | 条目级错误 |
 | `events` | array | 本轮生命周期事件 |
@@ -27,7 +31,7 @@ reports/fetch-report-run-000001.md
 |---|---|---|
 | `run_id` | string | `run-000001` 形式 |
 | `started_at` / `finished_at` | string | 本轮开始/结束时间 |
-| `status` | string | `ok` / `partial` / `failed` |
+| `status` | string | `ok` / `partial` / `failed`；被定格的旧轮为 `interrupted` |
 | `config_path` | string/null | 本轮配置路径 |
 | `sources_total` | int | 启用的来源数 |
 | `sources_ok` | int | 成功解析并归档的来源数 |
@@ -72,8 +76,42 @@ reports/fetch-report-run-000001.md
 | `error_message` | string/null | 面向人的简短消息 |
 | `truncated` | bool | 是否因单源条目上限截断 |
 | `observed_at` | string | 处理该源的时刻 |
+| `processing` | string | `processed` / `resumed` / `recorded` |
 
 超限的 source 若解析成功但条目被截断，`status` 仍为 `ok`，同时 `truncated=true`、`error_code=ITEMS_TRUNCATED`，且不会执行缺失对账。
+
+`processing` 的含义：
+
+- `processed`：普通 fetch 或恢复过程中本轮实际处理的来源；
+- `resumed`：`resume` 时沿用旧轮结果、本阶段未重新抓取的来源；
+- `recorded`：`finalize` 定格后旧轮里保留的来源事实。
+
+## 3.1 `recovery` 字段
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `recovery_action` | string/null | `resume` / `finalize` / null |
+| `recovery_at` | string/null | 最近一次恢复操作时刻 |
+| `interrupted_at` | string/null | 定格时刻（仅被定格的旧轮） |
+| `resume_count` | int | 续跑次数 |
+| `prior_run_id` | string/null | `finalize` 新轮引用的旧轮 |
+| `successor_run_id` | string/null | 被定格旧轮引用的新轮 |
+| `reused_sources` | array | `resume` 时沿用的来源 id |
+| `processed_sources` | array | 本次恢复实际处理的来源 id |
+
+## 3.2 `progress` 字段
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `interrupted` | bool | 本轮是否涉及中断处理（含 `resume` 完成的轮次） |
+| `reason` | string/null | 面向人的中断/处理说明 |
+| `handling` | string/null | `resume` / `finalize` / null |
+| `interrupted_at` | string/null | 定格时刻 |
+| `configured_sources` | array | 计划处理的来源（配置顺序） |
+| `completed_sources` | array | 已有 `source_runs` 的来源 |
+| `pending_sources` | array | 计划中尚无记录的来源 |
+
+`completed_sources` 按 `source_id` 升序，与 `sources[]` 一致；`configured_sources` 与 `pending_sources` 保留配置顺序，因为恢复校验依赖顺序。
 
 ## 4. `item_issues[]` 字段
 
@@ -129,12 +167,13 @@ inventory 表示**报告生成时**的账本状态；较早 run 的报告如果�
 
 1. 标题（run id）；
 2. 元信息（状态、开始、结束、配置、报告生成）；
-3. 汇总表；
-4. 来源明细表；
-5. 来源错误；
-6. 条目级错误；
-7. 生命周期事件；
-8. 当前归档清单。
+3. 中断与恢复（仅当本轮涉及中断或恢复时出现）；
+4. 汇总表；
+5. 来源明细表（含“处理”列）；
+6. 来源错误；
+7. 条目级错误；
+8. 生命周期事件；
+9. 当前归档清单。
 
 表格单元格中的 `|` 会转义，换行会替换为空格；空值渲染为 `-`。没有内容时输出“无。”或用空表占位。
 

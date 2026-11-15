@@ -69,6 +69,20 @@ python -m feedkeep fetch --config configs/feeds.yaml --db data/archive.sqlite3
 python -m feedkeep report --db data/archive.sqlite3 --out reports/
 ```
 
+### 中断轮次
+
+如果进程在某个来源之后退出，数据库会留下带部分来源的 `running` 轮次。此时 `report` 默认跳过它，显式 `--run-id` 也会被拒绝。用 `recover` 明确选择处理方式：
+
+```bash
+# 继续同一轮：仅当来源集合/顺序与策略摘要完全一致，跳过已完成来源
+python -m feedkeep recover --mode resume
+
+# 定格旧轮并完整重开：旧轮记为 interrupted，新轮重新抓取所有启用来源
+python -m feedkeep recover --mode finalize
+```
+
+`recover` 默认选中最近的 `running` 轮次，也可用 `--run-id` 指定。恢复前提校验失败时退出码为 5，不会写入任何来源。报告会新增“中断与恢复”小节，并标出已完成、未完成、沿用与本次处理的来源。细节见 [docs/RECOVERY.md](docs/RECOVERY.md)。
+
 ### 测试
 
 ```bash

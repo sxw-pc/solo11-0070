@@ -28,7 +28,7 @@ feeds.yaml + policy.yaml
 
 ## 2. 数据模型
 
-SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL）、`synchronous=FULL`。`schema_meta.schema_version` 记录结构版本；当前为 1，遇到更高版本直接拒绝，避免旧二进制写坏新库。
+SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL）、`synchronous=FULL`。`schema_meta.schema_version` 记录结构版本；当前为 2，遇到更高版本直接拒绝，避免旧二进制写坏新库。v1 数据库在打开时原地迁移，新增列不重建表。
 
 ### `sources`
 
@@ -45,7 +45,13 @@ SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL�
 - `id`：形如 `run-000001`，按已有最大值递增，便于稳定引用；
 - `started_at/finished_at/status`；
 - 汇总计数：来源成功/未修改/失败、条目 seen/new/updated/missing/restored、条目级错误数；
-- `config_path`：便于审计本轮使用的配置路径。
+- `config_path`：便于审计本轮使用的配置路径；
+- `snapshot_json/fingerprint`：本轮开始时的来源顺序与策略摘要，以及其 sha256；
+- `recovery_action/recovery_at/resume_count/interrupted_at`：恢复操作与续跑次数；
+- `prior_run_id/successor_run_id`：`finalize` 重开时新旧轮的互相引用；
+- `reused_sources_json/processed_sources_json`：续跑时沿用旧结果与本次实际处理的来源。
+
+状态取值为 `running / ok / partial / failed / interrupted`。`interrupted` 只由显式 `recover --mode finalize` 产生，汇总由已有 `source_runs` 重算后固定。
 
 ### `source_runs`
 
@@ -55,7 +61,8 @@ SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL�
 - HTTP 状态、总耗时、响应字节数、响应体 sha256、ETag、Last-Modified；
 - 实际 HTTP 尝试次数 `attempts`；
 - 条目计数、条目错误数、是否截断；
-- `error_code/error_message/observed_at`。
+- `error_code/error_message/observed_at`；
+- `record_digest`：该行所有汇总相关字段加 `run_id` 的 sha256，续跑前用于证明已完成事实未被篡改或半写。
 
 一个响应体过大时，字节数记录为服务端声明或实际观察到的值；内容被丢弃，因此 sha256 为空。304 没有响应体，sha256 也为空。
 
@@ -212,9 +219,19 @@ min(backoff_base_ms * 2^n, 30_000ms)
 - `apply_observation` 在单个 SQLite 事务内写 item、附件、事件、条目问题和缺失状态；
 - source 成功状态与 source_run 在观察后写入；
 - 存储异常会转为该源的 `STORE_ERROR`，不影响其他源；
-- 整轮结束后统一计算 `ok / partial / failed` 并写 runs 汇总。
+- 整轮结束后统一计算 `ok / partial / failed` 并写 runs 汇总；
+- 进程在两个来源之间退出会留下 `running` 轮次与部分 `source_runs`；只有显式 `recover` 能继续或定格它，普通 `fetch` 永远创建新轮。细节见 `docs/RECOVERY.md`。
 
-## 11. 测试策略
+## 11. 中断轮次恢复
+
+两种完整且互斥的路线：
+
+- `resume`：要求旧轮快照与当前配置的来源集合、顺序、策略摘要完全一致，且每个已完成来源的 `record_digest` 校验通过、构成配置顺序的连续前缀。复用旧 `run_id`，跳过已有来源，处理剩余来源，最后从持久化 `source_runs` 重算汇总；
+- `finalize`：在一个事务内把旧轮标为 `interrupted`（汇总由已有来源重算），创建新 `run_id`，按当前配置完整执行。审计上表现为“部分旧轮 + 完整新轮”。
+
+`latest_run_id` 排除 `running` 与 `interrupted`，中断轮次必须显式引用。
+
+## 12. 测试策略
 
 - 纯函数：配置、策略、格式嗅探、归一化、身份、指纹、生命周期；
 - 组件：三个 parser、Fetcher、Store；

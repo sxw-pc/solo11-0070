@@ -10,8 +10,8 @@ from typing import Any, Iterable, Optional, Sequence
 from .lifecycle import plan_missing, plan_transition
 from .models import (ApplyStats, Enclosure, ExistingItem, FeedSource, ItemIssue,
                      NormalizedItem, RunCounts, SourceRunRecord, SourceState)
+from .recovery import canonical_json, source_record_digest, validate_source_record
 from .schema import initialize
-
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -97,17 +97,60 @@ class Store:
                 "WHERE id=?", (checked_at, source_id))
 
     # -- runs ---------------------------------------------------------
-    def create_run(self, started_at: str, config_path: Optional[str]) -> str:
+    def create_run(self, started_at: str, config_path: Optional[str],
+                   snapshot: Optional[dict[str, Any]] = None,
+                   fingerprint: Optional[str] = None,
+                   prior_run_id: Optional[str] = None,
+                   recovery_action: Optional[str] = None) -> str:
         row = self.conn.execute(
             "SELECT COALESCE(MAX(CAST(substr(id, 5) AS INTEGER)), 0) AS n FROM runs"
         ).fetchone()
         run_id = f"run-{int(row['n']) + 1:06d}"
         with self.conn:
             self.conn.execute(
-                "INSERT INTO runs(id,started_at,status,config_path) VALUES(?,?,?,?)",
-                (run_id, started_at, "running", config_path),
+                """INSERT INTO runs(
+                   id,started_at,status,config_path,snapshot_json,fingerprint,
+                   prior_run_id,recovery_action)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (run_id, started_at, "running", config_path,
+                 canonical_json(snapshot) if snapshot is not None else None,
+                 fingerprint, prior_run_id, recovery_action),
             )
         return run_id
+
+    def freeze_and_create(self, old_run_id: str, interrupted_at: str,
+                          counts: RunCounts, config_path: Optional[str],
+                          snapshot: dict[str, Any], fingerprint: str) -> str:
+        """Atomically freeze an interrupted run and open its replacement.
+
+        The old run keeps all source_runs it already recorded; its summary is
+        recomputed from those rows.  The new run starts empty with the current
+        plan, so a partial old round and a complete new round never share an id.
+        """
+
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(CAST(substr(id, 5) AS INTEGER)), 0) AS n FROM runs"
+        ).fetchone()
+        new_run_id = f"run-{int(row['n']) + 1:06d}"
+        columns = ", ".join(f"{key}=?" for key in counts.as_dict())
+        with self.conn:
+            self.conn.execute(
+                """INSERT INTO runs(
+                   id,started_at,status,config_path,snapshot_json,fingerprint,
+                   prior_run_id,recovery_action)
+                   VALUES(?,?,?,?,?,?,?,?)""",
+                (new_run_id, interrupted_at, "running", config_path,
+                 canonical_json(snapshot), fingerprint, old_run_id, "finalize"),
+            )
+            self.conn.execute(
+                f"""UPDATE runs SET status='interrupted', finished_at=?,
+                    interrupted_at=?, recovery_action='finalize', recovery_at=?,
+                    successor_run_id=?, {columns}
+                    WHERE id=? AND status='running'""",
+                (interrupted_at, interrupted_at, interrupted_at, new_run_id,
+                 *counts.as_dict().values(), old_run_id),
+            )
+        return new_run_id
 
     def finish_run(self, run_id: str, finished_at: str, status: str,
                    counts: RunCounts) -> None:
@@ -125,16 +168,78 @@ class Store:
                    run_id,source_id,source_name,status,http_status,duration_ms,
                    body_bytes,body_sha256,etag,last_modified,attempts,items_total,
                    items_new,items_updated,items_missing,items_restored,item_errors,
-                   error_code,error_message,truncated,observed_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   error_code,error_message,truncated,observed_at,record_digest)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (run_id, record.source_id, record.source_name, record.status,
                  record.http_status, record.duration_ms, record.body_bytes,
                  record.body_sha256, record.etag, record.last_modified, record.attempts,
                  record.items_total, record.items_new, record.items_updated,
                  record.items_missing, record.items_restored, record.item_errors,
                  record.error_code, record.error_message, int(record.truncated),
-                 record.observed_at),
+                 record.observed_at, source_record_digest(run_id, record)),
             )
+
+    def get_run_snapshot(self, run_id: str) -> Optional[dict[str, Any]]:
+        row = self.conn.execute(
+            "SELECT snapshot_json FROM runs WHERE id=?", (run_id,)).fetchone()
+        if row is None:
+            return None
+        if not row["snapshot_json"]:
+            return None
+        snapshot = _json_load(row["snapshot_json"], None)
+        return snapshot if isinstance(snapshot, dict) else None
+
+    def get_source_run_records(self, run_id: str) -> list[SourceRunRecord]:
+        return [SourceRunRecord.from_row(row) for row in self.get_source_runs(run_id)]
+
+    def begin_resume(self, run_id: str, resumed_at: str) -> int:
+        """Stamp a resume attempt and return the new attempt ordinal."""
+
+        with self.conn:
+            self.conn.execute(
+                """UPDATE runs SET recovery_action='resume', recovery_at=?,
+                   resume_count=resume_count+1 WHERE id=? AND status='running'""",
+                (resumed_at, run_id),
+            )
+            row = self.conn.execute(
+                "SELECT resume_count FROM runs WHERE id=?", (run_id,)).fetchone()
+        return int(row["resume_count"]) if row else 0
+
+    def set_recovery_lists(self, run_id: str, reused_source_ids: list[str],
+                           processed_source_ids: list[str]) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE runs SET reused_sources_json=?, processed_sources_json=? WHERE id=?",
+                (canonical_json(reused_source_ids),
+                 canonical_json(processed_source_ids), run_id),
+            )
+
+    def get_recovery_sources(self, run_id: str, kind: str) -> list[str]:
+        column = "reused_sources_json" if kind == "reused" else "processed_sources_json"
+        row = self.conn.execute(
+            f"SELECT {column} FROM runs WHERE id=?", (run_id,)).fetchone()
+        if row is None:
+            return []
+        value = _json_load(row[column], [])
+        return [str(item) for item in value] if isinstance(value, list) else []
+
+    def verify_recorded_source_runs(self, run_id: str) -> list[SourceRunRecord]:
+        """Return recorded outcomes after proving each digest matches its bytes."""
+
+        rows = self.get_source_runs(run_id)
+        for row in rows:
+            validate_source_record(run_id, row)
+        return [SourceRunRecord.from_row(row) for row in rows]
+
+    def interrupted_runs(self) -> list[dict[str, Any]]:
+        rows = self.conn.execute(
+            "SELECT * FROM runs WHERE status='interrupted' ORDER BY rowid").fetchall()
+        return [dict(row) for row in rows]
+
+    def running_run(self) -> Optional[dict[str, Any]]:
+        row = self.conn.execute(
+            "SELECT * FROM runs WHERE status='running' ORDER BY rowid DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
 
     # -- observation / lifecycle -------------------------------------
     def _enclosures(self, source_id: str, item_key: str) -> tuple[Enclosure, ...]:
@@ -250,15 +355,18 @@ class Store:
             stats.item_errors = len(issues)
         return stats
 
-    # -- report queries ----------------------------------------------
-    def latest_run_id(self) -> Optional[str]:
-        row = self.conn.execute(
-            "SELECT id FROM runs WHERE status<>'running' ORDER BY rowid DESC LIMIT 1").fetchone()
-        return row["id"] if row else None
-
     def get_run(self, run_id: str) -> Optional[dict[str, Any]]:
         row = self.conn.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
         return dict(row) if row else None
+
+    # -- report queries ----------------------------------------------
+    def latest_run_id(self) -> Optional[str]:
+        """The newest finished round; interrupted rounds need an explicit id."""
+
+        row = self.conn.execute(
+            "SELECT id FROM runs WHERE status NOT IN ('running','interrupted') "
+            "ORDER BY rowid DESC LIMIT 1").fetchone()
+        return row["id"] if row else None
 
     def get_source_runs(self, run_id: str) -> list[dict[str, Any]]:
         rows = self.conn.execute(
