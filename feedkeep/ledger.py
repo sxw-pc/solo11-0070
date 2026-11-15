@@ -104,7 +104,7 @@ class Ledger:
         truncated = len(parsed.items) > self.policy.max_items_per_feed
         for index, raw_item in enumerate(parsed.items[: self.policy.max_items_per_feed]):
             try:
-                item = normalize_item(raw_item)
+                item = normalize_item(raw_item, source.identity_contract)
             except IdentityError as exc:
                 issues.append(ItemIssue(index, exc.code, exc.message))
                 continue

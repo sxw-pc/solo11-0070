@@ -120,6 +120,34 @@ def test_load_config_convenience(tmp_path, mock_server, source_factory, write_fe
     assert isinstance(policy, object)
 
 
+def test_identity_contract_defaults_and_validates(tmp_path, write_policy):
+    base = {
+        "id": "x", "name": "x", "url": "http://127.0.0.1:8765/feeds/rss-basic.xml",
+        "format": "auto", "enabled": True, "tags": [], "note": "",
+    }
+    default_path = tmp_path / "default.yaml"
+    default_path.write_text(yaml.safe_dump(
+        {"version": 1, "feeds": [dict(base)]}), encoding="utf-8")
+    feeds = load_feeds(default_path, load_policy(write_policy()))
+    assert feeds[0].identity_contract == "id_first"
+
+    link_path = tmp_path / "link.yaml"
+    link_path.write_text(yaml.safe_dump(
+        {"version": 1, "feeds": [dict(base, identity_contract="link_first")]}),
+        encoding="utf-8")
+    feeds = load_feeds(link_path, load_policy(write_policy()))
+    assert feeds[0].identity_contract == "link_first"
+
+    bad_path = tmp_path / "bad.yaml"
+    bad_path.write_text(yaml.safe_dump(
+        {"version": 1, "feeds": [dict(base, identity_contract="publisher_whim")]}),
+        encoding="utf-8")
+    with pytest.raises(ConfigError) as raised:
+        load_feeds(bad_path, load_policy(write_policy()))
+    issue = next(i for i in raised.value.issues if i.code == "CFG_009")
+    assert issue.path == "feeds[0].identity_contract"
+
+
 def test_validation_mentions_file_and_path(tmp_path, write_feeds, source_factory, write_policy):
     external = FeedSource(
         id="bad", name="bad", url="http://198.51.100.8/feed.xml", format="auto",

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -20,6 +20,8 @@ CREATE TABLE IF NOT EXISTS sources (
     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
     tags_json TEXT NOT NULL,
     note TEXT NOT NULL,
+    identity_contract TEXT NOT NULL DEFAULT 'id_first'
+        CHECK (identity_contract IN ('id_first', 'link_first')),
     etag TEXT,
     last_modified TEXT,
     last_checked_at TEXT,
@@ -107,8 +109,10 @@ CREATE TABLE IF NOT EXISTS item_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     source_id TEXT NOT NULL REFERENCES sources(id),
     item_key TEXT NOT NULL,
-    run_id TEXT NOT NULL REFERENCES runs(id),
-    event_type TEXT NOT NULL CHECK (event_type IN ('discovered', 'updated', 'missing', 'restored')),
+    run_id TEXT REFERENCES runs(id),
+    event_type TEXT NOT NULL CHECK (event_type IN (
+        'discovered', 'updated', 'missing', 'restored', 'identity_changed'
+    )),
     observed_at TEXT NOT NULL,
     detail_json TEXT NOT NULL,
     UNIQUE (source_id, item_key, run_id, event_type)
@@ -123,11 +127,79 @@ CREATE TABLE IF NOT EXISTS item_issues (
     message TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS identity_migrations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id TEXT NOT NULL REFERENCES sources(id),
+    from_contract TEXT NOT NULL CHECK (from_contract IN ('id_first', 'link_first')),
+    to_contract TEXT NOT NULL CHECK (to_contract IN ('id_first', 'link_first')),
+    items_migrated INTEGER NOT NULL,
+    applied_at TEXT NOT NULL,
+    UNIQUE (source_id, from_contract, to_contract)
+);
+
 CREATE INDEX IF NOT EXISTS idx_items_source_missing
     ON items(source_id, missing_since);
 CREATE INDEX IF NOT EXISTS idx_events_run ON item_events(run_id);
 CREATE INDEX IF NOT EXISTS idx_issues_run ON item_issues(run_id);
+CREATE INDEX IF NOT EXISTS idx_identity_migrations_source
+    ON identity_migrations(source_id);
 """
+
+#: Rebuild item_events so the CHECK allows identity_changed and run_id becomes
+#: nullable (identity migrations are not fetch runs).  SQLite cannot ALTER a
+#: CHECK constraint, so the table is recreated and rows copied verbatim.
+_EVENTS_V2_REBUILD = """
+CREATE TABLE item_events_v2 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id TEXT NOT NULL REFERENCES sources(id),
+    item_key TEXT NOT NULL,
+    run_id TEXT REFERENCES runs(id),
+    event_type TEXT NOT NULL CHECK (event_type IN (
+        'discovered', 'updated', 'missing', 'restored', 'identity_changed'
+    )),
+    observed_at TEXT NOT NULL,
+    detail_json TEXT NOT NULL,
+    UNIQUE (source_id, item_key, run_id, event_type)
+);
+INSERT INTO item_events_v2(
+    id, source_id, item_key, run_id, event_type, observed_at, detail_json
+)
+SELECT id, source_id, item_key, run_id, event_type, observed_at, detail_json
+FROM item_events;
+DROP TABLE item_events;
+ALTER TABLE item_events_v2 RENAME TO item_events;
+CREATE INDEX idx_events_run ON item_events(run_id);
+"""
+
+
+def _upgrade_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Additive, data-preserving upgrade of a version-1 database."""
+
+    conn.executescript(_EVENTS_V2_REBUILD)
+    conn.execute(
+        "ALTER TABLE sources ADD COLUMN identity_contract TEXT NOT NULL "
+        "DEFAULT 'id_first' CHECK (identity_contract IN ('id_first', 'link_first'))"
+    )
+    conn.execute(
+        """
+        CREATE TABLE identity_migrations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL REFERENCES sources(id),
+            from_contract TEXT NOT NULL CHECK (from_contract IN ('id_first', 'link_first')),
+            to_contract TEXT NOT NULL CHECK (to_contract IN ('id_first', 'link_first')),
+            items_migrated INTEGER NOT NULL,
+            applied_at TEXT NOT NULL,
+            UNIQUE (source_id, from_contract, to_contract)
+        )
+        """
+    )
+    conn.execute(
+        "CREATE INDEX idx_identity_migrations_source ON identity_migrations(source_id)"
+    )
+    conn.execute(
+        "UPDATE schema_meta SET value=? WHERE key='schema_version'",
+        (str(SCHEMA_VERSION),),
+    )
 
 
 def initialize(conn: sqlite3.Connection) -> None:
@@ -137,15 +209,43 @@ def initialize(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA journal_mode = DELETE")
     conn.execute("PRAGMA synchronous = FULL")
-    conn.executescript(SCHEMA_SQL)
-    row = conn.execute("SELECT value FROM schema_meta WHERE key='schema_version'").fetchone()
-    if row is None:
+    meta_exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_meta'"
+    ).fetchone()
+    if meta_exists is None:
+        # Fresh database: build the current schema in one pass.
+        conn.executescript(SCHEMA_SQL)
         conn.execute(
             "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
         conn.commit()
-    elif int(row["value"]) > SCHEMA_VERSION:
+        return
+    row = conn.execute(
+        "SELECT value FROM schema_meta WHERE key='schema_version'"
+    ).fetchone()
+    if row is None:
+        # Table exists without a version row: treat as a fresh install and
+        # let the idempotent DDL create the remaining objects.
+        conn.executescript(SCHEMA_SQL)
+        conn.execute(
+            "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+        conn.commit()
+        return
+    version = int(row["value"])
+    if version > SCHEMA_VERSION:
         raise RuntimeError(
             f"database schema {row['value']} is newer than supported {SCHEMA_VERSION}"
         )
+    if version < SCHEMA_VERSION:
+        # Upgrade step by step.  DDL inside executescript implicitly commits
+        # any open transaction; every step is additive and preserves data.
+        if version == 1:
+            _upgrade_v1_to_v2(conn)
+        conn.commit()
+    else:
+        # Same-version database: IF NOT EXISTS statements are no-ops and make
+        # initialization safe to replay.
+        conn.executescript(SCHEMA_SQL)

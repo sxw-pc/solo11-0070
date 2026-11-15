@@ -17,6 +17,8 @@ class FeedSource:
     enabled: bool
     tags: tuple[str, ...]
     note: str
+    #: 条目身份契约："id_first"（发布者 ID 优先）或 "link_first"（规范链接优先）。
+    identity_contract: str = "id_first"
 
 
 @dataclass(frozen=True)

@@ -28,7 +28,7 @@ feeds.yaml + policy.yaml
 
 ## 2. 数据模型
 
-SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL）、`synchronous=FULL`。`schema_meta.schema_version` 记录结构版本；当前为 1，遇到更高版本直接拒绝，避免旧二进制写坏新库。
+SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL）、`synchronous=FULL`。`schema_meta.schema_version` 记录结构版本；当前为 2（v1 库打开时自动做保留数据的 additive 升级：事件表重建以容纳 `identity_changed` 并允许空 `run_id`、sources 增加 `identity_contract`、新建 `identity_migrations`），遇到更高版本直接拒绝，避免旧二进制写坏新库。
 
 ### `sources`
 
@@ -75,14 +75,19 @@ SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL�
 
 ### `item_events`
 
-只允许四类事件：
+允许五类事件：
 
 - `discovered`：首次出现；
 - `updated`：内容指纹改变，detail 包含变更字段与新/旧指纹；
 - `missing`：一次完整成功抓取中未再出现；
-- `restored`：此前缺失的条目重新出现。
+- `restored`：此前缺失的条目重新出现；
+- `identity_changed`：身份契约迁移把条目改名到新 `item_key`，detail 含旧键、新键与前后契约；该事件不属于抓取 run，`run_id` 为空。
 
-表上有 `(source_id,item_key,run_id,event_type)` 唯一约束，防止同一 run 重放产生重复事件。
+表上有 `(source_id,item_key,run_id,event_type)` 唯一约束，防止同一 run 重放产生重复事件（`run_id` 为空时 SQLite 唯一约束允许每个事件类型各一条）。
+
+### `identity_migrations`
+
+身份契约迁移台账，每个源每次契约切换一行（`(source_id,from_contract,to_contract)` 唯一）：迁移条目数与应用时间。它是判断库内现有键实际遵循哪个契约的权威来源；重复执行迁移时据此报告“已对齐”并跳过改名。
 
 ### `item_issues`
 
@@ -90,7 +95,16 @@ SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL�
 
 ## 3. 条目身份
 
-身份按以下优先级生成，只有得到身份后才可入库：
+### 3.1 身份契约
+
+每个源在 `feeds.yaml` 中通过可选字段 `identity_contract` 显式声明身份契约，缺省为 `id_first`：
+
+- `id_first`（发布者 ID 优先）：显式 id -> 规范链接 -> `title+published_at`。同一规范链接下两个不同 id 的版本是**两个业务条目**，发布方改 id 即新条目；
+- `link_first`（规范链接优先）：规范链接 -> 显式 id -> `title+published_at`。同一文章链接在发布方轮换 id 后仍是**一条连续历史**。
+
+两条路线在两个主字段都缺失时都回退到 `title+published_at`，三者皆无时产生条目级错误 `ITEM_NO_IDENTITY`。契约只决定 `item_key` 的选取顺序，不改变内容指纹；`sources.identity_contract` 保存配置声明的目标契约，库内现有键实际遵循的契约以 `identity_migrations` 台账为准。
+
+身份按所选契约的优先级生成，只有得到身份后才可入库：
 
 1. 发布方显式 id（RSS `guid`、Atom `id`、JSON Feed `id`）；
 2. 规范化链接（scheme/host 小写、去掉默认端口与 fragment、保留 path/query）；
@@ -105,9 +119,26 @@ item_key = "id:"   + sha256(raw_id)[:32]
 ```
 
 - 显式 id 只做首尾空白与 NFC 归一化；
-- 三者都没有时产生条目级错误 `ITEM_NO_IDENTITY`，该条目被跳过，其他条目继续；
 - 同一响应内两个条目得到相同 key 时，保留第一条，第二条记 `ITEM_DUPLICATE_KEY`；
 - 主键同时含 source_id，因此不同来源的相同 id 不会冲突。
+
+### 3.2 身份契约迁移
+
+直接改变某源的契约会让旧 `item_key` 留在库中、新键被当作新条目，并可能把旧条目同时记为 missing。因此契约切换必须经过显式迁移工具，分两步执行：
+
+1. `feedkeep identity-plan`：**只读**重算每个条目的新键，生成冲突清单，不写数据库；
+2. `feedkeep identity-migrate`：仅当清单无阻塞冲突时才应用，否则整体拒绝、退出码 4、不动任何数据。
+
+规划器只接受**无歧义的一对一映射**。以下情况一律阻止自动迁移，报告给出 `source_id`、旧/新键与原因，绝不丢内容或任选胜者：
+
+| 冲突码 | 触发条件 |
+|---|---|
+| `IDM_MANY_OLD_ONE_NEW_CONTENT` | 多个旧身份映射同一新身份且内容指纹不同（合并必丢内容） |
+| `IDM_MANY_OLD_ONE_NEW` | 多个旧身份映射同一新身份，即使指纹相同也无安全自动合并 |
+| `IDM_ONE_OLD_MANY_NEW` | 一个旧身份对应多个新身份（含目标契约下无法重算身份的条目） |
+| `IDM_LEDGER_DRIFT` | 迁移台账与 sources 表记录的契约矛盾（中断或库被外部改动） |
+
+应用迁移时每个源在一个事务内完成，键名经“旧键 → 临时键 → 新键”两阶段改名，因此交换、链形映射也不会碰撞；外键约束延迟到提交时检查。`items`、`item_enclosures`、`item_events` 随键一起移动，`first_seen_at / last_seen_at / last_changed_at / missing_since` 与全部内容列原样保留，每个改名条目在新键上追加一条 `identity_changed` 事件（`run_id` 为空，detail 记录旧键、新键与前后契约）。迁移结果写入 `identity_migrations` 台账。中断后重复运行幂等：已对齐的源报告零改名，不产生重复事件；报告同时输出当前契约、已对齐源数与迁移条目数。迁移只改键与台账，**不改变任何原始素材**。
 
 ## 4. 内容指纹
 
@@ -118,7 +149,7 @@ item_key = "id:"   + sha256(raw_id)[:32]
 - 文本先做 NFC、换行归一与行尾空白清理；
 - 附件按解析顺序记录 URL、MIME、声明长度、position。
 
-身份字段（raw_id / item_key）**不进入**内容指纹：发布方改了 id 意味着新条目；只改正文才意味着同一 item 的 `updated`。
+身份字段（raw_id / item_key）**不进入**内容指纹：只改正文才意味着同一 item 的 `updated`。发布方改 id 的语义由身份契约决定——`id_first` 下视为新条目，`link_first` 下只要规范链接不变就仍是同一条目的连续历史。
 
 ## 5. 生命周期状态机
 

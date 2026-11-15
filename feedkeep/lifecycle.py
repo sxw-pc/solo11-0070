@@ -43,6 +43,24 @@ def plan_missing(existing: ExistingItem) -> ItemEvent:
     return ItemEvent("missing", {"last_content_hash": existing.content_hash})
 
 
+def plan_identity_change(old_item_key: str, new_item_key: str,
+                         from_contract: str, to_contract: str,
+                         identity_kind: str) -> ItemEvent:
+    """Build the audit event appended when a contract migration renames a key.
+
+    The event lives on the new key and preserves the old key inside its
+    detail, so the full event chain stays traceable across the rename.
+    """
+
+    return ItemEvent("identity_changed", {
+        "from_contract": from_contract,
+        "to_contract": to_contract,
+        "old_item_key": old_item_key,
+        "new_item_key": new_item_key,
+        "identity_kind": identity_kind,
+    })
+
+
 def inventory_state(missing_since: Optional[str]) -> str:
     return "missing" if missing_since else "active"
 

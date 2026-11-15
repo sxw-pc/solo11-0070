@@ -7,6 +7,8 @@ feeds:
     enabled: true
     tags: [rss, demo]
     note: 带 ETag 与 Last-Modified 的 RSS 2.0 合成源
+    # 身份契约可选：id_first（默认，发布者 ID 优先）或 link_first（规范链接优先）
+    identity_contract: id_first
   - id: atom-basic
     name: 示例 Atom 基础源
     url: http://127.0.0.1:8765/feeds/atom-basic.xml

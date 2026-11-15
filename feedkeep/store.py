@@ -49,17 +49,82 @@ class Store:
             for source in sources:
                 self.conn.execute(
                     """
-                    INSERT INTO sources(id,name,url,format,enabled,tags_json,note)
-                    VALUES(?,?,?,?,?,?,?)
+                    INSERT INTO sources(id,name,url,format,enabled,tags_json,note,identity_contract)
+                    VALUES(?,?,?,?,?,?,?,?)
                     ON CONFLICT(id) DO UPDATE SET
                       name=excluded.name,
                       etag=CASE WHEN sources.url<>excluded.url THEN NULL ELSE sources.etag END,
-                      last_modified=CASE WHEN sources.url<>excluded.url THEN NULL ELSE sources.last_modified END, url=excluded.url, format=excluded.format,
-                      enabled=excluded.enabled, tags_json=excluded.tags_json, note=excluded.note
+                      last_modified=CASE WHEN sources.url<>excluded.url THEN NULL ELSE sources.last_modified END,
+                      url=excluded.url, format=excluded.format,
+                      enabled=excluded.enabled, tags_json=excluded.tags_json, note=excluded.note,
+                      identity_contract=excluded.identity_contract
                     """,
                     (source.id, source.name, source.url, source.format,
-                     int(source.enabled), _json(list(source.tags)), source.note),
+                     int(source.enabled), _json(list(source.tags)), source.note,
+                     source.identity_contract),
                 )
+
+    def source_ids(self) -> list[str]:
+        rows = self.conn.execute("SELECT id FROM sources ORDER BY id").fetchall()
+        return [row["id"] for row in rows]
+
+    def has_source(self, source_id: str) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM sources WHERE id=?", (source_id,)
+        ).fetchone() is not None
+
+    def get_identity_contract(self, source_id: str) -> Optional[str]:
+        """Return the contract that the source's *stored keys* currently follow.
+
+        The migration ledger is authoritative: it records every applied
+        contract change.  Sources without a ledger row predate identity
+        contracts (or have never been migrated), so their keys follow the
+        historical ``id_first`` route even if configuration already declares
+        a different target contract.
+        """
+
+        row = self.conn.execute(
+            """SELECT to_contract FROM identity_migrations
+               WHERE source_id=? ORDER BY id DESC LIMIT 1""",
+            (source_id,),
+        ).fetchone()
+        if row is not None:
+            return row["to_contract"]
+        if self.conn.execute(
+            "SELECT 1 FROM sources WHERE id=?", (source_id,)
+        ).fetchone() is None:
+            return None
+        return "id_first"
+
+    def get_configured_contract(self, source_id: str) -> Optional[str]:
+        """Return the contract snapshot stored on the sources row itself."""
+
+        row = self.conn.execute(
+            "SELECT identity_contract FROM sources WHERE id=?", (source_id,)
+        ).fetchone()
+        return row["identity_contract"] if row is not None else None
+
+    def get_identity_rows(self, source_id: str) -> list[dict[str, Any]]:
+        """Read the raw material needed to recompute identity keys."""
+
+        rows = self.conn.execute(
+            """SELECT item_key, raw_id, title, link, published_at, content_hash
+               FROM items WHERE source_id=? ORDER BY item_key""",
+            (source_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_migration_records(self, source_id: Optional[str] = None) -> list[dict[str, Any]]:
+        if source_id is None:
+            rows = self.conn.execute(
+                "SELECT * FROM identity_migrations ORDER BY source_id, id"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM identity_migrations WHERE source_id=? ORDER BY id",
+                (source_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def get_source_state(self, source_id: str) -> Optional[SourceState]:
         row = self.conn.execute("SELECT * FROM sources WHERE id=?", (source_id,)).fetchone()
@@ -249,6 +314,99 @@ class Store:
                 )
             stats.item_errors = len(issues)
         return stats
+
+    # -- identity contract migration ---------------------------------
+    def apply_identity_migration(
+        self,
+        source_id: str,
+        mappings: Sequence["IdentityMapping"],
+        from_contract: str,
+        to_contract: str,
+        observed_at: str,
+    ) -> int:
+        """Rename item keys for one source without losing ledger history.
+
+        Every mapping is executed inside one transaction.  Keys are first
+        moved to unique temporary names and then to their final names, so
+        swap and chain mappings cannot collide.  Items, enclosures and the
+        full event chain move with the key; first_seen / last_changed /
+        missing state and every content column are preserved untouched.  An
+        ``identity_changed`` event carrying the old and new key is appended
+        to each renamed item.
+        """
+
+        changes = [m for m in mappings if m.old_key != m.new_key]
+        with self.conn:
+            if changes:
+                # Defer enclosure->items enforcement until commit so the two
+                # rename phases never trip the foreign key midway.
+                self.conn.execute("PRAGMA defer_foreign_keys = ON")
+                # Phase 1: old key -> temporary key (items, enclosures, events).
+                for index, mapping in enumerate(changes):
+                    temp_key = f"__migrate_{observed_at}_{index}__"
+                    for statement, params in (
+                        ("UPDATE items SET item_key=? WHERE source_id=? AND item_key=?",
+                         (temp_key, source_id, mapping.old_key)),
+                        ("UPDATE item_enclosures SET item_key=? WHERE source_id=? AND item_key=?",
+                         (temp_key, source_id, mapping.old_key)),
+                        ("UPDATE item_events SET item_key=? WHERE source_id=? AND item_key=?",
+                         (temp_key, source_id, mapping.old_key)),
+                    ):
+                        self.conn.execute(statement, params)
+                # Phase 2: temporary key -> final key.
+                for index, mapping in enumerate(changes):
+                    temp_key = f"__migrate_{observed_at}_{index}__"
+                    for statement, params in (
+                        ("UPDATE items SET item_key=? WHERE source_id=? AND item_key=?",
+                         (mapping.new_key, source_id, temp_key)),
+                        ("UPDATE item_enclosures SET item_key=? WHERE source_id=? AND item_key=?",
+                         (mapping.new_key, source_id, temp_key)),
+                        ("UPDATE item_events SET item_key=? WHERE source_id=? AND item_key=?",
+                         (mapping.new_key, source_id, temp_key)),
+                    ):
+                        self.conn.execute(statement, params)
+                    moved = self.conn.execute(
+                        "SELECT 1 FROM items WHERE source_id=? AND item_key=?",
+                        (source_id, mapping.new_key),
+                    ).fetchone()
+                    if moved is None:
+                        raise RuntimeError(
+                            f"identity migration lost item {mapping.old_key!r} for {source_id!r}"
+                        )
+                    self.conn.execute(
+                        """INSERT OR IGNORE INTO item_events(
+                           source_id,item_key,run_id,event_type,observed_at,detail_json)
+                           VALUES(?,?,NULL,'identity_changed',?,?)""",
+                        (source_id, mapping.new_key, observed_at, _json({
+                            "from_contract": from_contract,
+                            "to_contract": to_contract,
+                            "old_item_key": mapping.old_key,
+                            "new_item_key": mapping.new_key,
+                            "identity_kind": mapping.kind,
+                        })),
+                    )
+            self.conn.execute(
+                "UPDATE sources SET identity_contract=? WHERE id=?",
+                (to_contract, source_id),
+            )
+            existing = self.conn.execute(
+                """SELECT id FROM identity_migrations
+                   WHERE source_id=? AND from_contract=? AND to_contract=?""",
+                (source_id, from_contract, to_contract),
+            ).fetchone()
+            if existing is None:
+                self.conn.execute(
+                    """INSERT INTO identity_migrations(
+                       source_id,from_contract,to_contract,items_migrated,applied_at)
+                       VALUES(?,?,?,?,?)""",
+                    (source_id, from_contract, to_contract, len(changes), observed_at),
+                )
+            else:
+                self.conn.execute(
+                    "UPDATE identity_migrations SET items_migrated=?, applied_at=? WHERE id=?",
+                    (len(changes), observed_at, existing["id"]),
+                )
+        return len(changes)
 
     # -- report queries ----------------------------------------------
     def latest_run_id(self) -> Optional[str]:

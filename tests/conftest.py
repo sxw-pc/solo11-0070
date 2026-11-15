@@ -42,10 +42,11 @@ def mock_server():
 @pytest.fixture
 def source_factory():
     def make(server, path="/feeds/rss-basic.xml", source_id="rss-basic",
-             fmt="auto", enabled=True, url=None):
+             fmt="auto", enabled=True, url=None, identity_contract="id_first"):
         return FeedSource(
             id=source_id, name=f"source {source_id}", url=url or server.base_url + path,
             format=fmt, enabled=enabled, tags=("test",), note="synthetic",
+            identity_contract=identity_contract,
         )
     return make
 
@@ -57,6 +58,7 @@ def write_feeds(tmp_path):
             "id": source.id, "name": source.name, "url": source.url,
             "format": source.format, "enabled": source.enabled,
             "tags": list(source.tags), "note": source.note,
+            "identity_contract": source.identity_contract,
         } for source in sources]
         path = tmp_path / filename
         path.write_text(
@@ -91,13 +93,13 @@ def write_policy(tmp_path):
 def item_factory():
     def make(raw_id="item-1", title="示例标题", link=None, summary=None,
              content=None, published="2024-01-01T00:00:00Z", authors=(),
-             categories=(), enclosures=()):
+             categories=(), enclosures=(), contract="id_first"):
         parsed = ParsedItem(
             raw_id=raw_id, title=title, link=link, summary=summary, content=content,
             published_at=published, authors=tuple(authors),
             categories=tuple(categories), enclosures=tuple(enclosures),
         )
-        return normalize_item(parsed)
+        return normalize_item(parsed, contract)
     return make
 
 

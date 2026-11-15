@@ -91,7 +91,16 @@ feeds:
     enabled: true
     tags: [rss, demo]
     note: 合成源说明
+    identity_contract: id_first   # 可选，id_first（默认）或 link_first
 ```
+
+`identity_contract` 声明该源的条目身份契约：
+
+- `id_first`：发布者 ID 优先（id -> 链接 -> title+日期）。同一链接下两个不同 ID 保留为两个业务条目；
+- `link_first`：规范链接优先（链接 -> id -> title+日期）。发布者轮换 ID 但链接不变时，文章保持一条连续历史；
+- 两条路线在 id 与链接都缺失时都回退到 `title+published_at`。
+
+切换已归档源的契约前，先用迁移工具生成只读冲突清单，再显式应用，见下文 `identity-plan` / `identity-migrate`。
 
 `configs/policy.yaml` 控制白名单与请求边界：
 
@@ -114,14 +123,19 @@ backoff_base_ms: 250
 |---|---|
 | `python -m feedkeep fetch --config ... [--policy ...] [--db ...] [--quiet]` | 执行一轮抓取 |
 | `python -m feedkeep report [--db ...] [--out ...] [--run-id ...]` | 生成最近一轮或指定 run 的报告 |
+| `python -m feedkeep identity-plan --config ... [--source ID ...] [--json] [--out ...]` | 只读生成身份契约迁移冲突清单，不改动数据库 |
+| `python -m feedkeep identity-migrate --config ... [--source ID ...] [--json] [--out ...]` | 显式应用身份契约迁移；有冲突时整体拒绝 |
 | `python -m feedkeep demo [--out ...] [--port ...]` | 离线自检演示 |
+
+迁移工作流：先改 `feeds.yaml` 中目标源的 `identity_contract`，运行 `identity-plan` 查看当前契约、待迁移条目与阻塞冲突（一对多、多对一、内容合并、台账漂移都会被阻止并列出旧/新键与原因）；清单无冲突后运行 `identity-migrate`。迁移保留 `first_seen` / `last_changed` / 缺失状态与完整事件链，为每个改名条目追加 `identity_changed` 事件；中断后重复运行幂等，且不改变原始素材。
 
 | 退出码 | 含义 |
 |---|---|
-| `0` | 成功 / 全部来源未修改 |
+| `0` | 成功 / 全部来源未修改 / 迁移计划无冲突 |
 | `1` | 部分来源失败（run 状态 `partial`） |
 | `2` | 全部失败、无启用来源或没有可报告记录 |
 | `3` | 配置 / 策略校验失败 |
+| `4` | 身份迁移存在阻塞冲突（未改动任何数据） |
 | `130` | 用户中断 |
 
 ## 目录
@@ -132,7 +146,7 @@ feedkeep/         采集、解析、归档、生命周期、报告、CLI
 mockserver/       回环 mock 发布服务 + 静态 fixture
 docs/             设计、合规边界、报告字段字典
 reports/          运行产物（内容被 .gitignore 忽略）
-tests/            105 项离线测试
+tests/            离线测试（身份、迁移、解析、归档、端到端）
 ```
 
 ## 关键保证
@@ -140,8 +154,9 @@ tests/            105 项离线测试
 - **出网边界**：请求前校验 URL 白名单，不使用系统代理；重定向目标也做同样校验；非白名单主机不会触发 DNS。
 - **请求边界**：连接/读取超时、响应体上限、单源条目上限、同主机最小间隔、重试上限。
 - **格式边界**：XML 显式拒绝 `DOCTYPE` / `ENTITY`；JSON 仅接受 UTF-8；三格式统一条目模型。
-- **归档幂等**：条目身份优先使用发布方 id，其次规范化链接，最后 title+发布时间；同内容重复出现只更新 `last_seen_at`。
-- **生命周期**：`discovered` / `updated` / `missing` / `restored` 事件；成功抓取且未被截断时才做缺失对账。
+- **归档幂等**：条目身份按源声明的契约生成——`id_first` 走 id -> 链接 -> title+日期，`link_first` 走链接 -> id -> title+日期；同内容重复出现只更新 `last_seen_at`。
+- **身份迁移安全**：契约切换先出只读冲突清单再显式应用；非一对一映射一律阻止，不丢内容、不任选胜者；迁移保留全部生命周期状态与事件链，重复执行幂等。
+- **生命周期**：`discovered` / `updated` / `missing` / `restored` / `identity_changed` 事件；成功抓取且未被截断时才做缺失对账。
 - **可审计**：每个 run、每个 source_run、每次条目级错误、每个生命周期事件都落库；报告数组有固定排序规则。
 - **可复现**：fixture 由脚本生成并有 sha256 清单；注入时钟后，测试不比较真实时间。
 
