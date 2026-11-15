@@ -185,6 +185,27 @@ class ApplyStats:
     items_restored: int = 0
     item_errors: int = 0
 
+    def add(self, other: "ApplyStats") -> "ApplyStats":
+        """Accumulate per-chunk counters in place and return self."""
+
+        self.items_seen += other.items_seen
+        self.items_new += other.items_new
+        self.items_updated += other.items_updated
+        self.items_missing += other.items_missing
+        self.items_restored += other.items_restored
+        self.item_errors += other.item_errors
+        return self
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            "items_seen": self.items_seen,
+            "items_new": self.items_new,
+            "items_updated": self.items_updated,
+            "items_missing": self.items_missing,
+            "items_restored": self.items_restored,
+            "item_errors": self.item_errors,
+        }
+
 
 @dataclass
 class RunCounts:
@@ -236,6 +257,7 @@ class SourceRunRecord:
     error_message: Optional[str]
     truncated: bool
     observed_at: str
+    reconcile_mode: str = "atomic"
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -258,6 +280,7 @@ class SourceRunRecord:
             "error_code": self.error_code,
             "error_message": self.error_message,
             "truncated": self.truncated,
+            "reconcile_mode": self.reconcile_mode,
             "observed_at": self.observed_at,
         }
 

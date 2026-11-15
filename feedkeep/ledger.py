@@ -8,6 +8,12 @@ from .clock import Clock, SystemClock
 from .detect import FormatDetectionError, detect_format
 from .fetcher import Fetcher
 from .identity import IdentityError, normalize_item
+from .lifecycle import (
+    ATOMIC_SNAPSHOT,
+    DUPLICATE_KEY_CODE,
+    DUPLICATE_KEY_MESSAGE,
+    validate_reconcile_mode,
+)
 from .models import (
     ApplyStats,
     FeedSource,
@@ -19,16 +25,21 @@ from .models import (
 )
 from .parsers import ParseError, parse_feed
 from .policy import Policy
-from .store import Store
+from .store import DEFAULT_CHUNK_SIZE, Store
 
 
 class Ledger:
     def __init__(self, store: Store, policy: Policy, fetcher: Optional[Fetcher] = None,
-                 clock: Optional[Clock] = None):
+                 clock: Optional[Clock] = None,
+                 reconcile_mode: str = ATOMIC_SNAPSHOT,
+                 chunk_size: Optional[int] = None):
+        validate_reconcile_mode(reconcile_mode)
         self.store = store
         self.policy = policy
         self.clock = clock or SystemClock()
         self.fetcher = fetcher or Fetcher(policy, self.clock)
+        self.reconcile_mode = reconcile_mode
+        self.chunk_size = chunk_size
 
     def run(self, sources: Iterable[FeedSource],
             config_path: Optional[str] = None) -> RunSummary:
@@ -109,14 +120,18 @@ class Ledger:
                 issues.append(ItemIssue(index, exc.code, exc.message))
                 continue
             if item.item_key in seen:
-                issues.append(ItemIssue(index, "ITEM_DUPLICATE_KEY",
-                                        f"条目 {index} 与同一响应中的其他条目身份冲突"))
+                issues.append(ItemIssue(
+                    index, DUPLICATE_KEY_CODE,
+                    DUPLICATE_KEY_MESSAGE.format(index=index),
+                ))
                 continue
             seen.add(item.item_key)
             normalized.append(item)
         try:
             stats = self.store.apply_observation(
-                source.id, run_id, observed_at, normalized, issues, truncated=truncated,
+                source.id, run_id, observed_at, normalized, issues,
+                truncated=truncated, mode=self.reconcile_mode,
+                chunk_size=self.chunk_size or DEFAULT_CHUNK_SIZE,
             )
         except Exception as exc:
             self.store.mark_failure(source.id, observed_at)
@@ -150,4 +165,5 @@ class Ledger:
             error_message=error_message if error_message is not None else result.error_message,
             truncated=bool(error_code == "ITEMS_TRUNCATED"),
             observed_at=observed_at,
+            reconcile_mode=self.reconcile_mode,
         )

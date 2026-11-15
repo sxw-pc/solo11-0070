@@ -3,10 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from .identity import changed_fields
 from .models import ExistingItem, ItemEvent, NormalizedItem
+
+# Reconciliation semantics offered by ``Store.apply_observation``.
+ATOMIC_SNAPSHOT = "atomic"
+PROGRESSIVE_VISIBLE = "progressive"
+RECONCILE_MODES = (ATOMIC_SNAPSHOT, PROGRESSIVE_VISIBLE)
+
+# Same message as the ledger-level duplicate guard, kept in one place so any
+# caller recording a duplicate cannot drift from the user-facing wording.
+DUPLICATE_KEY_CODE = "ITEM_DUPLICATE_KEY"
+DUPLICATE_KEY_MESSAGE = "条目 {index} 与同一响应中的其他条目身份冲突"
 
 
 @dataclass(frozen=True)
@@ -41,6 +51,39 @@ def plan_transition(existing: Optional[ExistingItem], item: NormalizedItem) -> T
 
 def plan_missing(existing: ExistingItem) -> ItemEvent:
     return ItemEvent("missing", {"last_content_hash": existing.content_hash})
+
+
+def plan_missing_for_hash(content_hash: str) -> ItemEvent:
+    """Plan a missing event without materializing the archived item body."""
+
+    return ItemEvent("missing", {"last_content_hash": content_hash})
+
+
+def stage_observation(items: Sequence[NormalizedItem]) -> list[NormalizedItem]:
+    """Bound the in-memory staging set: first key wins, later keys are skipped.
+
+    The staging list only ever holds keys from the current response (at most
+    ``max_items_per_feed`` entries); historical item bodies are never loaded.
+    Duplicate-key *issues* are the ledger's responsibility, matching the
+    historical store boundary where the fetch path reported the conflict and
+    the store only applied the first occurrence.
+    """
+
+    unique: list[NormalizedItem] = []
+    seen: set[str] = set()
+    for item in items:
+        if item.item_key in seen:
+            continue
+        seen.add(item.item_key)
+        unique.append(item)
+    return unique
+
+
+def validate_reconcile_mode(mode: str) -> None:
+    if mode not in RECONCILE_MODES:
+        raise ValueError(
+            f"unknown reconcile mode {mode!r}; expected one of {RECONCILE_MODES!r}"
+        )
 
 
 def inventory_state(missing_since: Optional[str]) -> str:

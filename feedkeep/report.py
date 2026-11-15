@@ -9,7 +9,7 @@ from typing import Any, Optional
 from .clock import Clock, SystemClock
 from .store import Store
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 RUN_FIELDS = (
     "run_id", "started_at", "finished_at", "status", "config_path",
     "sources_total", "sources_ok", "sources_not_modified", "sources_failed",
@@ -20,7 +20,7 @@ SOURCE_FIELDS = (
     "source_id", "source_name", "status", "http_status", "duration_ms", "body_bytes",
     "body_sha256", "etag", "last_modified", "attempts", "items_total", "items_new",
     "items_updated", "items_missing", "items_restored", "item_errors",
-    "error_code", "error_message", "truncated", "observed_at",
+    "error_code", "error_message", "truncated", "reconcile_mode", "observed_at",
 )
 
 
@@ -62,6 +62,7 @@ def build_report(store: Store, run_id: Optional[str] = None,
         "item_issues": store.get_item_issues(selected),
         "events": events,
         "inventory": store.inventory_for_run(selected),
+        "partial_coverage": store.get_observation_coverage(selected),
     }
 
 
@@ -105,8 +106,8 @@ def render_markdown(report: dict[str, Any]) -> bytes:
         "",
         "## 来源明细",
         "",
-        _line(["来源", "状态", "HTTP", "尝试", "字节", "耗时ms", "条目", "新增", "更新", "缺失", "恢复", "错误"]),
-        _line(["---"] * 12),
+        _line(["来源", "状态", "HTTP", "尝试", "字节", "耗时ms", "条目", "新增", "更新", "缺失", "恢复", "错误", "对账模式"]),
+        _line(["---"] * 13),
     ]
     for source in report["sources"]:
         lines.append(_line([
@@ -114,9 +115,10 @@ def render_markdown(report: dict[str, Any]) -> bytes:
             source["attempts"], source["body_bytes"], source["duration_ms"],
             source["items_total"], source["items_new"], source["items_updated"],
             source["items_missing"], source["items_restored"], source["item_errors"],
+            source.get("reconcile_mode", "atomic"),
         ]))
     if not report["sources"]:
-        lines.append("| （无启用来源） | - | - | - | - | - | - | - | - | - | - | - |")
+        lines.append("| （无启用来源） | - | - | - | - | - | - | - | - | - | - | - | - |")
     lines.extend(["", "## 来源错误", ""])
     failures = [source for source in report["sources"] if source["error_code"]]
     if failures:
@@ -153,6 +155,24 @@ def render_markdown(report: dict[str, Any]) -> bytes:
         lines.append(_line([row["source_id"], row["total"], row["active"], row["missing"]]))
     if not report["inventory"]:
         lines.append("| （无） | - | - | - |")
+    lines.extend(["", "## 渐进观察覆盖检查点（未完成）", ""])
+    partial = report.get("partial_coverage", [])
+    if partial:
+        lines.extend([
+            _line(["来源", "分块", "已覆盖键数", "对账模式", "截断", "全量确认", "观察时间"]),
+            _line(["---"] * 7),
+        ])
+        for entry in partial:
+            lines.append(_line([
+                entry["source_id"],
+                f"{entry['chunk_index'] + 1}/{entry['chunk_count']}",
+                entry["keys_covered"], entry["reconcile_mode"],
+                "是" if entry["truncated"] else "否",
+                "是" if entry["full_response_confirmed"] else "否",
+                entry["observed_at"],
+            ]))
+    else:
+        lines.append("无。")
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 

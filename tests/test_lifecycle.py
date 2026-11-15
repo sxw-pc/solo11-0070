@@ -1,7 +1,20 @@
 from __future__ import annotations
 
-from feedkeep.lifecycle import inventory_state, plan_missing, plan_transition
+from feedkeep.lifecycle import (
+    ATOMIC_SNAPSHOT,
+    DUPLICATE_KEY_CODE,
+    DUPLICATE_KEY_MESSAGE,
+    PROGRESSIVE_VISIBLE,
+    RECONCILE_MODES,
+    inventory_state,
+    plan_missing,
+    plan_missing_for_hash,
+    plan_transition,
+    stage_observation,
+    validate_reconcile_mode,
+)
 from feedkeep.models import ExistingItem
+import pytest
 
 
 def _existing(item, missing_since=None, **overrides):
@@ -65,3 +78,43 @@ def test_plan_missing_and_inventory_state(item_factory):
     assert event.detail["last_content_hash"] == item.content_hash
     assert inventory_state(None) == "active"
     assert inventory_state("2024-01-02T00:00:00Z") == "missing"
+
+
+def test_plan_missing_for_hash_matches_plan_missing(item_factory):
+    item = item_factory()
+    from_hash = plan_missing_for_hash(item.content_hash)
+    from_item = plan_missing(_existing(item))
+    assert from_hash.event_type == from_item.event_type == "missing"
+    assert from_hash.detail == from_item.detail
+
+
+def test_stage_observation_keeps_first_key_and_skips_rest(item_factory):
+    first = item_factory(raw_id="dup", title="第一条")
+    second = item_factory(raw_id="dup", title="第二条")
+    other = item_factory(raw_id="other")
+    unique = stage_observation([first, second, other, second])
+    assert [item.item_key for item in unique] == [first.item_key, other.item_key]
+    # The staging helper never invents issues: the ledger owns that boundary.
+    assert all(isinstance(item, type(first)) for item in unique)
+
+
+def test_stage_observation_handles_empty_response():
+    assert stage_observation(()) == []
+
+
+def test_duplicate_key_issue_contract(item_factory):
+    # The ledger-facing constants stay stable for callers that record conflicts.
+    from feedkeep.models import ItemIssue
+    issue = ItemIssue(
+        3, DUPLICATE_KEY_CODE, DUPLICATE_KEY_MESSAGE.format(index=3),
+    )
+    assert issue.code == "ITEM_DUPLICATE_KEY"
+    assert issue.index == 3
+
+
+def test_reconcile_mode_validation():
+    validate_reconcile_mode(ATOMIC_SNAPSHOT)
+    validate_reconcile_mode(PROGRESSIVE_VISIBLE)
+    assert set(RECONCILE_MODES) == {ATOMIC_SNAPSHOT, PROGRESSIVE_VISIBLE}
+    with pytest.raises(ValueError, match="reconcile mode"):
+        validate_reconcile_mode("eventual")

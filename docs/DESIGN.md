@@ -88,6 +88,17 @@ SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL�
 
 条目级错误与 run 绑定，包含原始条目序号、稳定错误码、消息。整个源解析失败不会进入这里，而是记录在 `source_runs.error_code`。
 
+### `observation_checkpoints`
+
+渐进观察的覆盖检查点（schema v2 起），主键 `(source_id, run_id, chunk_index)`：
+
+- 每个已提交分块一行 `status='partial'`，记录该块的 `item_key` 覆盖集（`keys_json`）与分块计数；
+- 全量响应确认、缺失对账完成后写入 `chunk_index=-1, status='complete'` 的汇总行，并删除 partial 行；
+- 只要还存在 partial 行，就**禁止**把未见条目标记为 missing；中断后可凭检查点续跑，或在响应变化（分块数/键集不一致）时抛出 `ResumeError` 清晰标记部分状态；
+- 原子模式只写 complete 行，渐进模式先写 partial 行再写 complete 行。
+
+`source_runs.reconcile_mode` 记录该源本轮选择的对账语义：`atomic`（原子快照，默认）或 `progressive`（渐进可见）。
+
 ## 3. 条目身份
 
 身份按以下优先级生成，只有得到身份后才可入库：
@@ -209,9 +220,11 @@ min(backoff_base_ms * 2^n, 30_000ms)
 ## 10. 事务与失败隔离
 
 - 一轮抓取的每个源独立完成解析与归档；坏源不阻断后续源；
-- `apply_observation` 在单个 SQLite 事务内写 item、附件、事件、条目问题和缺失状态；
-- source 成功状态与 source_run 在观察后写入；
-- 存储异常会转为该源的 `STORE_ERROR`，不影响其他源；
+- `apply_observation` 支持两种显式对账语义，由 `source_runs.reconcile_mode` 与报告展示：
+  - **原子快照（`atomic`，默认）**：分块只用于限制单批查询规模，item、附件、事件、条目问题和缺失状态仍在**同一个提交边界**内写入；提交失败则整体回滚，旧状态完整保留，不暴露任何新条目；
+  - **渐进可见（`progressive`）**：已校验分块随各自事务先提交，新观察更早可见、单事务持锁更短；每个分块在同一事务内写覆盖检查点。全量响应确认前**禁止**缺失推导，因此中断不会产生虚假 missing/restored；续跑时校验分块数与键集，一致则跳过已完成前缀，不一致则抛 `ResumeError` 保留部分状态；
+- 两种模式都不再 `SELECT *` 物化来源全量历史：现存条目按本轮键集分批点查（`IN` 批量，规模受 `chunk_size` 约束），缺失推导用临时键表做 key-only 反连接流式扫描，只读取 `item_key/content_hash`；峰值常驻数据为 `O(chunk_size + 本轮键集)`，与历史库大小无关；
+- 存储异常会转为该源的 `STORE_ERROR`，不影响其他源；原子模式下异常前的写入随事务回滚，渐进模式下已提交前缀通过检查点可审计、可续跑；
 - 整轮结束后统一计算 `ok / partial / failed` 并写 runs 汇总。
 
 ## 11. 测试策略

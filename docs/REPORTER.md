@@ -13,13 +13,29 @@ reports/fetch-report-run-000001.md
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `schema_version` | int | 报告 schema 版本，当前为 1 |
+| `schema_version` | int | 报告 schema 版本，当前为 2 |
 | `generated_at` | string | 生成时刻，UTC 秒级 ISO-8601 |
 | `run` | object | 本轮汇总 |
 | `sources` | array | 每个启用来源的本轮明细 |
 | `item_issues` | array | 条目级错误 |
 | `events` | array | 本轮生命周期事件 |
 | `inventory` | array | 生成时刻各来源的当前归档清单 |
+| `partial_coverage` | array | 该 run 未完成的渐进观察覆盖检查点；已完成观察不出现 |
+
+`partial_coverage[]` 每个元素描述一个已提交、已校验但全量响应尚未确认的分块前缀：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `run_id` / `source_id` | string | 所属 run 与来源 |
+| `chunk_index` | int | 已提交分块序号（0 起始） |
+| `chunk_count` | int | 该响应按 `chunk_size` 切出的总分块数 |
+| `keys_covered` | int | 该分块已应用的唯一条目键数 |
+| `reconcile_mode` | string | 固定为 `progressive`（原子模式无 partial 状态） |
+| `truncated` | bool | 响应是否被条目上限截断 |
+| `full_response_confirmed` | bool | partial 行恒为 `false` |
+| `observed_at` | string | 分块提交时刻 |
+
+partial 存在意味着该 run 的未见条目**没有**也**不会**被标记为 missing；续跑完成后检查点被清除，数组回到空。
 
 ## 2. `run` 字段
 
@@ -71,6 +87,7 @@ reports/fetch-report-run-000001.md
 | `error_code` | string/null | 失败或告警码 |
 | `error_message` | string/null | 面向人的简短消息 |
 | `truncated` | bool | 是否因单源条目上限截断 |
+| `reconcile_mode` | string | 本轮对账语义：`atomic`（原子快照）/ `progressive`（渐进可见） |
 | `observed_at` | string | 处理该源的时刻 |
 
 超限的 source 若解析成功但条目被截断，`status` 仍为 `ok`，同时 `truncated=true`、`error_code=ITEMS_TRUNCATED`，且不会执行缺失对账。
@@ -130,11 +147,12 @@ inventory 表示**报告生成时**的账本状态；较早 run 的报告如果�
 1. 标题（run id）；
 2. 元信息（状态、开始、结束、配置、报告生成）；
 3. 汇总表；
-4. 来源明细表；
+4. 来源明细表（含“对账模式”列，显示 `atomic` / `progressive`）；
 5. 来源错误；
 6. 条目级错误；
 7. 生命周期事件；
-8. 当前归档清单。
+8. 当前归档清单；
+9. 渐进观察覆盖检查点（未完成）。
 
 表格单元格中的 `|` 会转义，换行会替换为空格；空值渲染为 `-`。没有内容时输出“无。”或用空表占位。
 

@@ -14,8 +14,9 @@ from .config import ConfigError, load_feeds, load_policy
 from .demo import main as demo_main
 from .fetcher import Fetcher
 from .ledger import Ledger
+from .lifecycle import RECONCILE_MODES
 from .report import ReportError, write_reports
-from .store import Store
+from .store import DEFAULT_CHUNK_SIZE, Store
 
 DEFAULT_DB = "data/feedkeep.sqlite3"
 DEFAULT_CONFIG = "configs/feeds.yaml"
@@ -35,6 +36,15 @@ def build_parser() -> argparse.ArgumentParser:
     fetch.add_argument("--config", default=DEFAULT_CONFIG, help="订阅源 YAML")
     fetch.add_argument("--policy", default=DEFAULT_POLICY, help="网络策略 YAML")
     fetch.add_argument("--db", default=DEFAULT_DB, help="SQLite 归档文件")
+    fetch.add_argument(
+        "--reconcile-mode", choices=RECONCILE_MODES, default="atomic",
+        help="观察对账语义：atomic=单事务原子快照（默认）；"
+             "progressive=分块渐进可见并记录覆盖检查点",
+    )
+    fetch.add_argument(
+        "--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE,
+        help="渐进模式每块校验/提交的条目数，同时限定单批历史查询规模",
+    )
     fetch.add_argument("--quiet", action="store_true", help="只输出 run 摘要")
 
     report = sub.add_parser("report", help="从归档生成 JSON/Markdown 报告")
@@ -62,7 +72,10 @@ def command_fetch(args: argparse.Namespace) -> int:
         return 3
     clock = SystemClock()
     with Store(args.db) as store:
-        ledger = Ledger(store, policy, Fetcher(policy, clock), clock)
+        ledger = Ledger(
+            store, policy, Fetcher(policy, clock), clock,
+            reconcile_mode=args.reconcile_mode, chunk_size=args.chunk_size,
+        )
         summary = ledger.run(sources, args.config)
     if not args.quiet:
         print(json.dumps(summary.as_dict(), ensure_ascii=False, indent=2, sort_keys=True))
