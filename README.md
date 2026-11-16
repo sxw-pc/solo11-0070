@@ -69,6 +69,27 @@ python -m feedkeep fetch --config configs/feeds.yaml --db data/archive.sqlite3
 python -m feedkeep report --db data/archive.sqlite3 --out reports/
 ```
 
+### 跨源条目谱系（只读）
+
+`global-report` 不修改任何 source-local 账本，仅从既有 `items` / `item_events` /
+`source_runs` 派生跨源关联，输出 `reports/global-report.json` 与
+`reports/global-report.md`，并同时给出两种统计口径：
+
+- **URL 谱系视图**：按完整规范化 link 把多个来源的条目归为一个页面谱系，其下不同
+  `content_hash` 是该页面地址的版本候选；同 URL 异 hash 显式标注为冲突、并列呈现，
+  不裁决胜者、不做跨源正文覆盖。
+- **内容快照视图**：每个 `(normalized_url, content_hash)` 是一个独立内容快照，按可
+  复核字节指纹计数，地址相同但内容不同即为不同快照。
+
+成员当前性结合每来源最近一次 `source_run` 状态与条目 `missing_since` 判定：整源失败、
+304、截断只把 last-known 成员关联标为 `stale`，不会被当作删除；只有完整成功轮次中的
+明确 missing 才结束该来源的活动关联。没有可用 link 的条目维持 source-local 身份，不按
+标题相似度猜测合并。
+
+```bash
+python -m feedkeep global-report --db data/archive.sqlite3 --out reports/
+```
+
 ### 测试
 
 ```bash
@@ -114,6 +135,7 @@ backoff_base_ms: 250
 |---|---|
 | `python -m feedkeep fetch --config ... [--policy ...] [--db ...] [--quiet]` | 执行一轮抓取 |
 | `python -m feedkeep report [--db ...] [--out ...] [--run-id ...]` | 生成最近一轮或指定 run 的报告 |
+| `python -m feedkeep global-report [--db ...] [--out ...]` | 只读跨源条目谱系报告（URL 谱系视图 + 内容快照视图），不改写归档 |
 | `python -m feedkeep demo [--out ...] [--port ...]` | 离线自检演示 |
 
 | 退出码 | 含义 |

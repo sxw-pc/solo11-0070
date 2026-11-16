@@ -298,3 +298,77 @@ class Store:
             (run_id,),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    # -- cross-source lineage (read-only derived index) --------------
+    def get_all_items(self) -> list[dict[str, Any]]:
+        """Return every source-local ledger row; item_key semantics unchanged."""
+
+        rows = self.conn.execute(
+            """SELECT source_id,item_key,raw_id,title,link,content_hash,
+                      first_seen_at,last_seen_at,last_changed_at,missing_since,
+                      first_run_id,last_run_id
+               FROM items
+               ORDER BY source_id,item_key"""
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_all_item_events(self) -> list[dict[str, Any]]:
+        """Return the full item event history for historical hash reconstruction."""
+
+        rows = self.conn.execute(
+            """SELECT source_id,item_key,run_id,event_type,observed_at,detail_json
+               FROM item_events
+               ORDER BY source_id,item_key,id"""
+        ).fetchall()
+        return [{
+            "source_id": row["source_id"],
+            "item_key": row["item_key"],
+            "run_id": row["run_id"],
+            "event_type": row["event_type"],
+            "observed_at": row["observed_at"],
+            "detail": _json_load(row["detail_json"], {}),
+        } for row in rows]
+
+    def get_latest_source_runs(self) -> list[dict[str, Any]]:
+        """Return the most recent source_run row per source, with run boundary info."""
+
+        rows = self.conn.execute(
+            """SELECT sr.*
+               FROM source_runs sr
+               JOIN (
+                   SELECT source_id, MAX(id) AS max_id
+                   FROM source_runs GROUP BY source_id
+               ) latest ON latest.max_id = sr.id
+               ORDER BY sr.source_id"""
+        ).fetchall()
+        result = []
+        for row in rows:
+            item = dict(row)
+            item["truncated"] = bool(item["truncated"])
+            result.append(item)
+        return result
+
+    def get_latest_complete_runs(self) -> dict[str, dict[str, Any]]:
+        """Map source_id -> its most recent full, non-truncated successful run.
+
+        Only ``status='ok'`` and ``truncated=0`` source runs qualify: failures,
+        304s and truncated observations never serve as complete inventories.
+        """
+
+        rows = self.conn.execute(
+            """SELECT sr.*
+               FROM source_runs sr
+               JOIN (
+                   SELECT source_id, MAX(id) AS max_id
+                   FROM source_runs
+                   WHERE status='ok' AND truncated=0
+                   GROUP BY source_id
+               ) latest ON latest.max_id = sr.id
+               ORDER BY sr.source_id"""
+        ).fetchall()
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            item = dict(row)
+            item["truncated"] = bool(item["truncated"])
+            result[item["source_id"]] = item
+        return result

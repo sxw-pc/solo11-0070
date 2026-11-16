@@ -125,9 +125,25 @@ CREATE TABLE IF NOT EXISTS item_issues (
 
 CREATE INDEX IF NOT EXISTS idx_items_source_missing
     ON items(source_id, missing_since);
+-- 跨源谱系视图（global-report）按规范化 link 做只读派生；
+-- 仅新增索引，不改变 items 主键 (source_id, item_key)。
+CREATE INDEX IF NOT EXISTS idx_items_link ON items(link);
 CREATE INDEX IF NOT EXISTS idx_events_run ON item_events(run_id);
 CREATE INDEX IF NOT EXISTS idx_issues_run ON item_issues(run_id);
 """
+
+
+def _reconcile_indexes(conn: sqlite3.Connection) -> None:
+    """Add additive indexes to databases created by older builds.
+
+    The cross-source lineage (``global-report``) is a read-only derivation and
+    introduces no new table or column, so the items primary key
+    ``(source_id, item_key)`` and the schema version stay intact. An older v1
+    database merely gains the idempotent link lookup index on open;
+    source-local item_key and event semantics are never rewritten.
+    """
+
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_items_link ON items(link)")
 
 
 def initialize(conn: sqlite3.Connection) -> None:
@@ -149,3 +165,6 @@ def initialize(conn: sqlite3.Connection) -> None:
         raise RuntimeError(
             f"database schema {row['value']} is newer than supported {SCHEMA_VERSION}"
         )
+    else:
+        _reconcile_indexes(conn)
+        conn.commit()

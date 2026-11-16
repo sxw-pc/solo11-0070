@@ -14,7 +14,7 @@ from .config import ConfigError, load_feeds, load_policy
 from .demo import main as demo_main
 from .fetcher import Fetcher
 from .ledger import Ledger
-from .report import ReportError, write_reports
+from .report import ReportError, write_global_reports, write_reports
 from .store import Store
 
 DEFAULT_DB = "data/feedkeep.sqlite3"
@@ -41,6 +41,13 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--db", default=DEFAULT_DB, help="SQLite 归档文件")
     report.add_argument("--out", default=DEFAULT_REPORTS, help="报告输出目录")
     report.add_argument("--run-id", default=None, help="默认使用最近一轮")
+
+    global_report = sub.add_parser(
+        "global-report",
+        help="只读跨源条目谱系报告（URL 谱系视图 + 内容快照视图，不修改归档）",
+    )
+    global_report.add_argument("--db", default=DEFAULT_DB, help="SQLite 归档文件")
+    global_report.add_argument("--out", default=DEFAULT_REPORTS, help="报告输出目录")
 
     demo = sub.add_parser("demo", help="启动本地 mock 服务并完成自检")
     demo.add_argument("--out", default="reports/demo", help="demo 报告目录")
@@ -96,6 +103,30 @@ def command_demo(args: argparse.Namespace) -> int:
     return demo_main(out_dir=args.out, port=args.port)
 
 
+def command_global_report(args: argparse.Namespace) -> int:
+    if not Path(args.db).exists():
+        print(f"数据库不存在: {args.db}", file=sys.stderr)
+        return 2
+    with Store(args.db) as store:
+        try:
+            json_path, markdown_path, report = write_global_reports(
+                store, args.out, SystemClock()
+            )
+        except ReportError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+    print(f"JSON: {json_path}")
+    print(f"Markdown: {markdown_path}")
+    stats = report["stats"]
+    print(
+        f"url_lineages={stats['url_lineage_count']} "
+        f"conflicts={stats['conflicting_url_lineage_count']} "
+        f"snapshots={stats['content_snapshot_count']} "
+        f"source_local={stats['source_local_item_count']}"
+    )
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -104,6 +135,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return command_fetch(args)
         if args.command == "report":
             return command_report(args)
+        if args.command == "global-report":
+            return command_global_report(args)
         if args.command == "demo":
             return command_demo(args)
     except KeyboardInterrupt:

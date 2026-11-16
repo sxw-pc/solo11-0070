@@ -165,3 +165,58 @@ json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
 - 不并发写入。
 
 真实运行时 `generated_at`、run 时间、`duration_ms` 属于时间相关字段，会随执行变化；这是设计上明确允许的差异。不要用真实墙钟断言报告字节相等。
+
+## 10. 跨源谱系报告 `global-report`
+
+`feedkeep global-report` 是**只读派生**报告：不写任何表、不改 `items` 主键
+`(source_id, item_key)`、不改 source-local `item_key` 与既有事件。它从全量
+`items` / `item_events` / `source_runs` 重建跨源关联，输出
+`reports/global-report.json` 与 `reports/global-report.md`，没有已完成 run 时退出码
+为 2。
+
+### 10.1 两个明确口径（不能合并成一个通用“去重数量”）
+
+| 视图 | 对象身份 | 对象计数口径 |
+|---|---|---|
+| URL 谱系视图 `url_view[]` | 完整规范化 link = 一个页面谱系 | 一个 URL 一个对象；同 URL 下不同 `content_hash` 是版本候选 |
+| 内容快照视图 `snapshot_view[]` | `(normalized_url, content_hash)` = 一个内容快照 | 每个 URL×hash 组合一个对象，按可复核字节计数 |
+
+同 URL 异 hash 时，URL 视图给出 **1 个冲突页面谱系**（`status=conflict`、
+`has_conflicting_versions=true`），快照视图给出 **2 个独立快照**。竞争版本并列输出，
+不选胜者、不做跨源正文覆盖。无 link 的条目进入 `source_local_items[]`，维持
+source-local 身份，不按标题相似度猜测合并。
+
+### 10.2 成员当前性（source_run 状态 × item missing 状态）
+
+每个成员（一条 source-local item 行）带 `state` 与 `currency`：
+
+| 最近 source_run | 条目 missing_since | state | currency |
+|---|---|---|---|
+| 完整成功（`ok` 且未截断）且条目活跃 | NULL | `active` | `current` |
+| 失败 `failed` | NULL | `active` | `stale` |
+| 304 `not_modified` | NULL | `active` | `stale` |
+| 成功但截断 `truncated=1` | NULL | `active` | `stale` |
+| 任意 | 非 NULL | `missing` | `ended` |
+| 无任何 source_run | NULL | `active` | `unknown` |
+
+失败、304 不是删除；截断观察不得推断被省略版本消失；只有完整成功轮次中的明确
+missing（写入 `missing_since`）才结束该来源的活动关联。一个来源 missing 不影响其他
+仍 active 来源对同一 URL 谱系的支撑；全部来源 missing 时谱系 `status=inactive`。
+
+### 10.3 版本历史与证据
+
+- 成员 `hash_history[]` 仅由完整成功观察产生的 `discovered` / `updated` 事件中的
+  `content_hash` 重建，相邻相同 hash 折叠；`missing` / `restored` 与 304/失败轮不产生
+  新版本。
+- 每个版本候选 / 快照带 `first_observed_run_id`、`last_observed_run_id` 与对应时间，
+  以及全部持有来源，可回指 source / run / hash 证据。
+
+### 10.4 排序与稳定性
+
+- URL 谱系按 `normalized_url` 升序；成员按 `(source_id, item_key)`；
+- 版本候选与快照按 `content_hash`（快照再按 URL）；
+- 来源汇总按 `source_id`；无 link 条目按 `(source_id, item_key)`。
+
+因此交换 source 配置 / 遍历顺序不改变报告字节。JSON 仍使用
+`json.dumps(..., sort_keys=True, indent=2)` 并以换行结尾。旧版 v1 数据库打开时仅幂等
+补齐 `idx_items_link` 索引，schema 版本与既有行不变。
