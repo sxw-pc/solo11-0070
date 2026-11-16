@@ -9,12 +9,20 @@ from typing import Any, Iterable
 
 import yaml
 
-from .models import FeedSource
+from .models import (
+    DEFAULT_REVISION_ORDER,
+    REVISION_ORDER_STRATEGIES,
+    FeedSource,
+)
 from .policy import LOOPBACK_HOSTS, Policy, PolicyViolation, normalize_allowed_hosts
 
 FORMATS = ("auto", "rss", "atom", "jsonfeed")
 ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 FEED_KEYS = ("id", "name", "url", "format", "enabled", "tags", "note")
+# Optional keys keep their own allow-list so the required-field check above
+# continues to demand exactly the legacy FEED_KEYS.
+FEED_OPTIONAL_KEYS = ("revision_order",)
+FEED_ALLOWED_KEYS = FEED_KEYS + FEED_OPTIONAL_KEYS
 POLICY_KEYS = (
     "version", "allowed_hosts", "timeout_seconds", "max_body_bytes",
     "max_items_per_feed", "min_interval_ms", "max_retries", "backoff_base_ms",
@@ -137,7 +145,7 @@ def _validate_feed(raw: Any, index: int, path: Path, policy: Policy) -> tuple[Fe
     issues: list[ConfigIssue] = []
     if not isinstance(raw, dict):
         return None, [_issue("CFG_005", path, prefix, "每个订阅源必须是映射对象")]
-    issues.extend(_unknown_keys(raw, FEED_KEYS, path, prefix))
+    issues.extend(_unknown_keys(raw, FEED_ALLOWED_KEYS, path, prefix))
     for key in FEED_KEYS:
         if key not in raw:
             issues.append(_issue("CFG_004", path, f"{prefix}.{key}", "缺少必填字段"))
@@ -165,6 +173,12 @@ def _validate_feed(raw: Any, index: int, path: Path, policy: Policy) -> tuple[Fe
         issues.append(_issue("CFG_005", path, f"{prefix}.tags", "必须是字符串列表"))
     if not isinstance(note, str):
         issues.append(_issue("CFG_005", path, f"{prefix}.note", "必须是字符串"))
+    revision_order = raw.get("revision_order", DEFAULT_REVISION_ORDER)
+    if revision_order not in REVISION_ORDER_STRATEGIES:
+        issues.append(_issue(
+            "CFG_009", path, f"{prefix}.revision_order",
+            f"必须是 {REVISION_ORDER_STRATEGIES!r} 之一",
+        ))
     if issues:
         return None, issues
     return FeedSource(
@@ -175,6 +189,7 @@ def _validate_feed(raw: Any, index: int, path: Path, policy: Policy) -> tuple[Fe
         enabled=enabled,
         tags=tuple(dict.fromkeys(tags)),
         note=note,
+        revision_order=revision_order,
     ), []
 
 

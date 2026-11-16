@@ -28,6 +28,43 @@ def test_atom_falls_back_to_updated_when_published_missing():
     assert beta.published_at == "2024-01-03T10:30:00Z"
 
 
+def test_atom_keeps_published_and_updated_as_distinct_fields():
+    body = b"""<feed xmlns="http://www.w3.org/2005/Atom">
+      <title>t</title><id>urn:f</id>
+      <entry>
+        <id>urn:f:1</id><title>x</title>
+        <published>2024-05-10T10:00:00Z</published>
+        <updated>2024-05-10T12:00:00Z</updated>
+      </entry>
+    </feed>"""
+    item = parse_atom(body).items[0]
+    assert item.published_at == "2024-05-10T10:00:00Z"
+    assert item.updated_at == "2024-05-10T12:00:00Z"
+
+
+def test_atom_updated_normalized_to_utc():
+    body = b"""<feed xmlns="http://www.w3.org/2005/Atom">
+      <title>t</title><id>urn:f</id>
+      <entry>
+        <id>urn:f:1</id><title>x</title>
+        <updated>2024-05-10T12:00:00+02:00</updated>
+      </entry>
+    </feed>"""
+    item = parse_atom(body).items[0]
+    assert item.updated_at == "2024-05-10T10:00:00Z"
+    assert item.published_at == "2024-05-10T10:00:00Z"
+
+
+def test_atom_invalid_updated_still_bad_date():
+    body = b"""<feed xmlns="http://www.w3.org/2005/Atom">
+      <title>t</title><id>urn:f</id>
+      <entry><id>urn:f:1</id><updated>not-a-date</updated></entry>
+    </feed>"""
+    result = parse_atom(body)
+    assert result.items == ()
+    assert result.issues[0].code == "ATOM_ITEM_BAD_DATE"
+
+
 def test_updated_atom_contains_new_entry():
     result = parse_atom(generate_all()["atom_updated.xml"])
     assert len(result.items) == 3

@@ -13,7 +13,7 @@ reports/fetch-report-run-000001.md
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `schema_version` | int | 报告 schema 版本，当前为 1 |
+| `schema_version` | int | 报告 schema 版本，当前为 2 |
 | `generated_at` | string | 生成时刻，UTC 秒级 ISO-8601 |
 | `run` | object | 本轮汇总 |
 | `sources` | array | 每个启用来源的本轮明细 |
@@ -38,6 +38,8 @@ reports/fetch-report-run-000001.md
 | `items_updated` | int | 内容指纹变化数 |
 | `items_missing` | int | 本轮新标记缺失数 |
 | `items_restored` | int | 从缺失恢复数 |
+| `items_stale` | int | 因 Atom 修订水位更早而拒绝覆盖的陈旧观察数 |
+| `items_conflicted` | int | 同一 Atom `updated` 时间出现异 hash 的冲突数 |
 | `item_errors` | int | 条目级错误总数 |
 
 状态计算：
@@ -67,6 +69,8 @@ reports/fetch-report-run-000001.md
 | `items_updated` | int | 该源更新数 |
 | `items_missing` | int | 该源新缺失数 |
 | `items_restored` | int | 该源恢复数 |
+| `items_stale` | int | 该源被拒绝的陈旧 Atom 修订数 |
+| `items_conflicted` | int | 该源的同时间异 hash 冲突数 |
 | `item_errors` | int | 该源条目级错误数 |
 | `error_code` | string/null | 失败或告警码 |
 | `error_message` | string/null | 面向人的简短消息 |
@@ -101,7 +105,7 @@ reports/fetch-report-run-000001.md
 |---|---|---|
 | `source_id` | string | 来源 |
 | `item_key` | string | 条目稳定身份 |
-| `event_type` | string | `discovered` / `updated` / `missing` / `restored` |
+| `event_type` | string | `discovered` / `updated` / `missing` / `restored` / `stale_revision` / `revision_conflict` |
 | `observed_at` | string | 事件发生时刻 |
 | `detail` | object | 事件细节 |
 
@@ -111,6 +115,10 @@ reports/fetch-report-run-000001.md
 - updated：`content_hash`、`previous_hash`、`changed_fields`
 - missing：`last_content_hash`
 - restored：`content_hash`
+- stale_revision：`content_hash`（incoming 指纹）、`current_hash`（保留投影的指纹）、`incoming_updated_at`、`watermark_updated_at`、`revision_source`、`reason`（`incoming_updated_before_revision_watermark`）、`source_run_id`
+- revision_conflict：与 stale_revision 同构，`reason` 为 `same_updated_at_different_content`
+
+Markdown 报告在“生命周期事件”之后额外提供“修订水位证据（stale / conflict）”小节，逐列展示两个时间戳、两版 hash、来源 run 与原因；没有这类事件时输出“无。”。
 
 ## 6. `inventory[]` 字段
 
@@ -134,7 +142,8 @@ inventory 表示**报告生成时**的账本状态；较早 run 的报告如果�
 5. 来源错误；
 6. 条目级错误；
 7. 生命周期事件；
-8. 当前归档清单。
+8. 修订水位证据（stale / conflict）；
+9. 当前归档清单。
 
 表格单元格中的 `|` 会转义，换行会替换为空格；空值渲染为 `-`。没有内容时输出“无。”或用空表占位。
 

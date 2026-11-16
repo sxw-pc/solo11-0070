@@ -80,6 +80,9 @@ def normalize_item(item: ParsedItem) -> NormalizedItem:
         categories=tuple(item.categories),
         enclosures=tuple(item.enclosures),
         content_hash=content_hash(item),
+        # Deliberately outside content_hash: it is a revision watermark, not
+        # archived content, so a stale mirror does not fingerprint as "new".
+        updated_at=normalize_text(item.updated_at),
     )
 
 

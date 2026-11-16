@@ -5,6 +5,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Optional
 
+# Per-source Atom revision strategies.
+# - observed_order: every complete, valid feed observation is authoritative;
+#   content may move backwards (legacy behaviour, the default).
+# - source_revision_order: Atom ``updated`` is a monotonic per-item high-water
+#   mark; older observations are recorded as stale evidence without replacing
+#   the current projection.
+REVISION_ORDER_STRATEGIES = ("observed_order", "source_revision_order")
+DEFAULT_REVISION_ORDER = "observed_order"
+# Provenance recorded on the items revision watermark columns.
+REVISION_SOURCE_ATOM_UPDATED = "atom_updated"
+
 
 @dataclass(frozen=True)
 class FeedSource:
@@ -17,6 +28,7 @@ class FeedSource:
     enabled: bool
     tags: tuple[str, ...]
     note: str
+    revision_order: str = DEFAULT_REVISION_ORDER
 
 
 @dataclass(frozen=True)
@@ -50,6 +62,9 @@ class ParsedItem:
     authors: tuple[str, ...] = ()
     categories: tuple[str, ...] = ()
     enclosures: tuple[Enclosure, ...] = ()
+    # Atom ``updated`` (the source revision stamp), normalized to UTC. Stays
+    # None for RSS/JSON Feed, whose date fields keep their legacy semantics.
+    updated_at: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +101,7 @@ class NormalizedItem:
     categories: tuple[str, ...]
     enclosures: tuple[Enclosure, ...]
     content_hash: str
+    updated_at: Optional[str] = None
 
     def comparable_fields(self) -> dict[str, Any]:
         return {
@@ -116,6 +132,12 @@ class ExistingItem:
     enclosures: tuple[Enclosure, ...]
     content_hash: str
     missing_since: Optional[str]
+    # Atom source-revision high-water mark. A NULL revision_updated_at means
+    # the pre-upgrade order is unknown: the row predates the feature and its
+    # baseline must be established by the first valid observation instead of
+    # being guessed from published_at.
+    revision_updated_at: Optional[str] = None
+    revision_source: Optional[str] = None
 
     def comparable_fields(self) -> dict[str, Any]:
         return {
@@ -183,6 +205,8 @@ class ApplyStats:
     items_updated: int = 0
     items_missing: int = 0
     items_restored: int = 0
+    items_stale: int = 0
+    items_conflicted: int = 0
     item_errors: int = 0
 
 
@@ -197,6 +221,8 @@ class RunCounts:
     items_updated: int = 0
     items_missing: int = 0
     items_restored: int = 0
+    items_stale: int = 0
+    items_conflicted: int = 0
     item_errors: int = 0
 
     def as_dict(self) -> dict[str, int]:
@@ -210,6 +236,8 @@ class RunCounts:
             "items_updated": self.items_updated,
             "items_missing": self.items_missing,
             "items_restored": self.items_restored,
+            "items_stale": self.items_stale,
+            "items_conflicted": self.items_conflicted,
             "item_errors": self.item_errors,
         }
 
@@ -236,6 +264,8 @@ class SourceRunRecord:
     error_message: Optional[str]
     truncated: bool
     observed_at: str
+    items_stale: int = 0
+    items_conflicted: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -259,6 +289,8 @@ class SourceRunRecord:
             "error_message": self.error_message,
             "truncated": self.truncated,
             "observed_at": self.observed_at,
+            "items_stale": self.items_stale,
+            "items_conflicted": self.items_conflicted,
         }
 
 

@@ -91,7 +91,13 @@ feeds:
     enabled: true
     tags: [rss, demo]
     note: 合成源说明
+    revision_order: observed_order   # 可选，默认 observed_order
 ```
+
+`revision_order` 仅对 Atom 源生效，控制镜像/副本响应倒退时如何保护当前条目版本：
+
+- `observed_order`（默认）：每次完整有效观察即为权威，内容可随响应回滚，与旧版本行为完全一致；
+- `source_revision_order`：以 Atom `updated` 作为每个稳定 `item_key` 的单调高水位，更早的观察记为 `stale_revision` 事件而不覆盖当前内容，同一 `updated` 时间却出现不同 hash 记为 `revision_conflict`；被拒绝的观察仍刷新 `last_seen_at`，不会触发 missing。RSS / JSON Feed 始终沿用观察顺序语义。
 
 `configs/policy.yaml` 控制白名单与请求边界：
 

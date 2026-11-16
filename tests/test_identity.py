@@ -74,3 +74,12 @@ def test_changed_fields_are_sorted():
         enclosures=(), content_hash="old", missing_since=None,
     )
     assert changed_fields(existing, normalized) == ["content", "summary", "title"]
+
+
+def test_updated_at_is_carried_but_excluded_from_fingerprint():
+    first = normalize_item(_parsed(updated_at="2024-05-10T12:00:00Z"))
+    second = normalize_item(_parsed(updated_at="2024-05-11T09:00:00Z"))
+    assert first.updated_at == "2024-05-10T12:00:00Z"
+    assert second.updated_at == "2024-05-11T09:00:00Z"
+    assert first.content_hash == second.content_hash
+    assert first.item_key == second.item_key

@@ -51,6 +51,8 @@ class Ledger:
             counts.items_updated += record.items_updated
             counts.items_missing += record.items_missing
             counts.items_restored += record.items_restored
+            counts.items_stale += record.items_stale
+            counts.items_conflicted += record.items_conflicted
             counts.item_errors += record.item_errors
         status = self._run_status(counts)
         finished_at = self.clock.now_iso()
@@ -117,6 +119,7 @@ class Ledger:
         try:
             stats = self.store.apply_observation(
                 source.id, run_id, observed_at, normalized, issues, truncated=truncated,
+                revision_order=source.revision_order,
             )
         except Exception as exc:
             self.store.mark_failure(source.id, observed_at)
@@ -150,4 +153,6 @@ class Ledger:
             error_message=error_message if error_message is not None else result.error_message,
             truncated=bool(error_code == "ITEMS_TRUNCATED"),
             observed_at=observed_at,
+            items_stale=stats.items_stale,
+            items_conflicted=stats.items_conflicted,
         )

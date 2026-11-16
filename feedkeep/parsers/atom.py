@@ -85,6 +85,9 @@ def _parse_entry(entry: ET.Element, index: int) -> ParsedItem:
         authors=authors,
         categories=categories,
         enclosures=_enclosures(entry),
+        # Keep the source revision stamp separately so the store can protect
+        # the current projection against mirror rollback; both are UTC-normalized.
+        updated_at=updated,
     )
 
 

@@ -132,3 +132,48 @@ def test_validation_mentions_file_and_path(tmp_path, write_feeds, source_factory
     assert "CFG_003" in rendered
     assert "feeds.yaml" in rendered
     assert "feeds[0].url" in rendered
+
+
+def test_revision_order_defaults_to_observed_order(tmp_path, mock_server, source_factory,
+                                                   write_feeds, write_policy):
+    path = write_feeds([source_factory(mock_server, source_id="default-order")])
+    feeds = load_feeds(path, load_policy(write_policy()))
+    assert feeds[0].revision_order == "observed_order"
+
+
+def test_revision_order_accepts_source_revision_order(tmp_path, mock_server, source_factory,
+                                                      write_policy):
+    source = source_factory(mock_server, path="/feeds/atom-basic.xml",
+                            source_id="revision-order", fmt="atom")
+    feeds_yaml = tmp_path / "feeds.yaml"
+    import yaml
+    payload = {
+        "version": 1,
+        "feeds": [{
+            "id": source.id, "name": source.name, "url": source.url,
+            "format": source.format, "enabled": source.enabled,
+            "tags": list(source.tags), "note": source.note,
+            "revision_order": "source_revision_order",
+        }],
+    }
+    feeds_yaml.write_text(yaml.safe_dump(payload, allow_unicode=True, sort_keys=False),
+                          encoding="utf-8")
+    feeds = load_feeds(feeds_yaml, load_policy(write_policy()))
+    assert feeds[0].revision_order == "source_revision_order"
+
+
+def test_revision_order_rejects_unknown_strategy(tmp_path, write_policy):
+    path = tmp_path / "feeds.yaml"
+    path.write_text(yaml.safe_dump({
+        "version": 1,
+        "feeds": [{
+            "id": "x", "name": "x", "url": "http://127.0.0.1:8765/feeds/rss-basic.xml",
+            "format": "auto", "enabled": True, "tags": [], "note": "",
+            "revision_order": "rollback",
+        }],
+    }), encoding="utf-8")
+    with pytest.raises(ConfigError) as raised:
+        load_feeds(path, load_policy(write_policy()))
+    assert any(issue.code == "CFG_009"
+               and issue.path == "feeds[0].revision_order"
+               for issue in raised.value.issues)

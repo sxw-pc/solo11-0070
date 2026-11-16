@@ -9,17 +9,18 @@ from typing import Any, Optional
 from .clock import Clock, SystemClock
 from .store import Store
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 RUN_FIELDS = (
     "run_id", "started_at", "finished_at", "status", "config_path",
     "sources_total", "sources_ok", "sources_not_modified", "sources_failed",
     "items_seen", "items_new", "items_updated", "items_missing",
-    "items_restored", "item_errors",
+    "items_restored", "items_stale", "items_conflicted", "item_errors",
 )
 SOURCE_FIELDS = (
     "source_id", "source_name", "status", "http_status", "duration_ms", "body_bytes",
     "body_sha256", "etag", "last_modified", "attempts", "items_total", "items_new",
-    "items_updated", "items_missing", "items_restored", "item_errors",
+    "items_updated", "items_missing", "items_restored", "items_stale",
+    "items_conflicted", "item_errors",
     "error_code", "error_message", "truncated", "observed_at",
 )
 
@@ -94,29 +95,32 @@ def render_markdown(report: dict[str, Any]) -> bytes:
         "",
         "## 汇总",
         "",
-        _line(["来源", "成功", "未修改", "失败", "条目", "新增", "更新", "缺失", "恢复", "条目错误"]),
-        _line(["---", "---", "---", "---", "---", "---", "---", "---", "---", "---"]),
+        _line(["来源", "成功", "未修改", "失败", "条目", "新增", "更新", "缺失", "恢复",
+               "陈旧修订", "修订冲突", "条目错误"]),
+        _line(["---"] * 12),
         _line([
             run["sources_total"], run["sources_ok"], run["sources_not_modified"],
             run["sources_failed"], run["items_seen"], run["items_new"],
             run["items_updated"], run["items_missing"], run["items_restored"],
-            run["item_errors"],
+            run["items_stale"], run["items_conflicted"], run["item_errors"],
         ]),
         "",
         "## 来源明细",
         "",
-        _line(["来源", "状态", "HTTP", "尝试", "字节", "耗时ms", "条目", "新增", "更新", "缺失", "恢复", "错误"]),
-        _line(["---"] * 12),
+        _line(["来源", "状态", "HTTP", "尝试", "字节", "耗时ms", "条目", "新增", "更新",
+               "缺失", "恢复", "陈旧", "冲突", "错误"]),
+        _line(["---"] * 14),
     ]
     for source in report["sources"]:
         lines.append(_line([
             source["source_id"], source["status"], source["http_status"],
             source["attempts"], source["body_bytes"], source["duration_ms"],
             source["items_total"], source["items_new"], source["items_updated"],
-            source["items_missing"], source["items_restored"], source["item_errors"],
+            source["items_missing"], source["items_restored"],
+            source["items_stale"], source["items_conflicted"], source["item_errors"],
         ]))
     if not report["sources"]:
-        lines.append("| （无启用来源） | - | - | - | - | - | - | - | - | - | - | - |")
+        lines.append("| （无启用来源） | - | - | - | - | - | - | - | - | - | - | - | - | - | - |")
     lines.extend(["", "## 来源错误", ""])
     failures = [source for source in report["sources"] if source["error_code"]]
     if failures:
@@ -144,6 +148,27 @@ def render_markdown(report: dict[str, Any]) -> bytes:
             lines.append(_line([
                 event["source_id"], event["item_key"], event["event_type"],
                 event["observed_at"],
+            ]))
+    else:
+        lines.append("无。")
+    lines.extend(["", "## 修订水位证据（stale / conflict）", ""])
+    revision_events = [
+        event for event in report["events"]
+        if event["event_type"] in ("stale_revision", "revision_conflict")
+    ]
+    if revision_events:
+        lines.extend([
+            _line(["来源", "条目", "事件", "incoming updated", "watermark", "incoming hash",
+                   "保留 hash", "来源 run", "原因"]),
+            _line(["---"] * 9),
+        ])
+        for event in revision_events:
+            detail = event["detail"]
+            lines.append(_line([
+                event["source_id"], event["item_key"], event["event_type"],
+                detail.get("incoming_updated_at"), detail.get("watermark_updated_at"),
+                detail.get("content_hash"), detail.get("current_hash"),
+                detail.get("source_run_id"), detail.get("reason"),
             ]))
     else:
         lines.append("无。")

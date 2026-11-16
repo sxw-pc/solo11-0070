@@ -7,9 +7,21 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
-from .lifecycle import plan_missing, plan_transition
-from .models import (ApplyStats, Enclosure, ExistingItem, FeedSource, ItemIssue,
-                     NormalizedItem, RunCounts, SourceRunRecord, SourceState)
+from .lifecycle import plan_missing, plan_observation
+from .models import (
+    DEFAULT_REVISION_ORDER,
+    REVISION_SOURCE_ATOM_UPDATED,
+    ApplyStats,
+    Enclosure,
+    ExistingItem,
+    FeedSource,
+    ItemEvent,
+    ItemIssue,
+    NormalizedItem,
+    RunCounts,
+    SourceRunRecord,
+    SourceState,
+)
 from .schema import initialize
 
 
@@ -124,14 +136,16 @@ class Store:
                 """INSERT INTO source_runs(
                    run_id,source_id,source_name,status,http_status,duration_ms,
                    body_bytes,body_sha256,etag,last_modified,attempts,items_total,
-                   items_new,items_updated,items_missing,items_restored,item_errors,
+                   items_new,items_updated,items_missing,items_restored,
+                   items_stale,items_conflicted,item_errors,
                    error_code,error_message,truncated,observed_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (run_id, record.source_id, record.source_name, record.status,
                  record.http_status, record.duration_ms, record.body_bytes,
                  record.body_sha256, record.etag, record.last_modified, record.attempts,
                  record.items_total, record.items_new, record.items_updated,
-                 record.items_missing, record.items_restored, record.item_errors,
+                 record.items_missing, record.items_restored,
+                 record.items_stale, record.items_conflicted, record.item_errors,
                  record.error_code, record.error_message, int(record.truncated),
                  record.observed_at),
             )
@@ -155,6 +169,8 @@ class Store:
             categories=tuple(_json_load(row["categories_json"], [])),
             enclosures=self._enclosures(row["source_id"], row["item_key"]),
             content_hash=row["content_hash"], missing_since=row["missing_since"],
+            revision_updated_at=row["revision_updated_at"],
+            revision_source=row["revision_source"],
         )
 
     def _insert_event(self, source_id: str, item_key: str, run_id: str,
@@ -182,7 +198,8 @@ class Store:
 
     def apply_observation(self, source_id: str, run_id: str, observed_at: str,
                           items: Sequence[NormalizedItem], issues: Sequence[ItemIssue],
-                          truncated: bool = False) -> ApplyStats:
+                          truncated: bool = False,
+                          revision_order: str = DEFAULT_REVISION_ORDER) -> ApplyStats:
         stats = ApplyStats()
         seen: set[str] = set()
         with self.conn:
@@ -198,7 +215,13 @@ class Store:
                 seen.add(item.item_key)
                 row = rows.get(item.item_key)
                 existing = self._existing(row) if row is not None else None
-                transition = plan_transition(existing, item)
+                transition = plan_observation(existing, item, revision_order)
+                # Only Atom items carry a source revision stamp; the watermark
+                # provenance says so explicitly when one is written.
+                revision_value = item.updated_at
+                revision_source = (
+                    REVISION_SOURCE_ATOM_UPDATED if item.updated_at else None
+                )
                 values = (item.raw_id, item.title, item.link, item.summary, item.content,
                           item.published_at, _json(list(item.authors)),
                           _json(list(item.categories)), item.content_hash)
@@ -207,26 +230,49 @@ class Store:
                         """INSERT INTO items(
                            source_id,item_key,raw_id,title,link,summary,content,published_at,
                            authors_json,categories_json,content_hash,first_seen_at,last_seen_at,
-                           last_changed_at,missing_since,first_run_id,last_run_id)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)""",
+                           last_changed_at,missing_since,first_run_id,last_run_id,
+                           revision_updated_at,revision_source)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?,?,?)""",
                         (source_id, item.item_key, *values, observed_at, observed_at,
-                         observed_at, run_id, run_id),
+                         observed_at, run_id, run_id, revision_value, revision_source),
                     )
                     stats.items_new += 1
-                else:
+                    self._replace_enclosures(source_id, item.item_key, item)
+                elif transition.accept_content:
                     last_changed = observed_at if transition.is_updated else row["last_changed_at"]
                     self.conn.execute(
                         """UPDATE items SET raw_id=?,title=?,link=?,summary=?,content=?,
                            published_at=?,authors_json=?,categories_json=?,content_hash=?,
-                           last_seen_at=?,last_changed_at=?,missing_since=NULL,last_run_id=?
+                           last_seen_at=?,last_changed_at=?,missing_since=NULL,last_run_id=?,
+                           revision_updated_at=COALESCE(?,revision_updated_at),
+                           revision_source=COALESCE(?,revision_source)
                            WHERE source_id=? AND item_key=?""",
-                        (*values, observed_at, last_changed, run_id, source_id, item.item_key),
+                        (*values, observed_at, last_changed, run_id,
+                         revision_value, revision_source, source_id, item.item_key),
                     )
                     stats.items_updated += int(transition.is_updated)
                     stats.items_restored += int(transition.is_restored)
-                self._replace_enclosures(source_id, item.item_key, item)
+                    self._replace_enclosures(source_id, item.item_key, item)
+                else:
+                    # Rejected projection (stale revision or conflict): the
+                    # archived content, hash and enclosures stay untouched,
+                    # yet the observation still counts as seen this run so the
+                    # missing reconciliation cannot flag it as absent.
+                    self.conn.execute(
+                        """UPDATE items SET last_seen_at=?, missing_since=NULL, last_run_id=?
+                           WHERE source_id=? AND item_key=?""",
+                        (observed_at, run_id, source_id, item.item_key),
+                    )
+                    stats.items_restored += int(transition.is_restored)
+                    if any(event.event_type == "stale_revision" for event in transition.events):
+                        stats.items_stale += 1
+                    if any(event.event_type == "revision_conflict" for event in transition.events):
+                        stats.items_conflicted += 1
                 for event in transition.events:
-                    self._insert_event(source_id, item.item_key, run_id, observed_at, event)
+                    self._insert_event(
+                        source_id, item.item_key, run_id, observed_at,
+                        self._event_with_run(event, run_id),
+                    )
                 stats.items_seen += 1
 
             if not truncated:
@@ -249,6 +295,15 @@ class Store:
                 )
             stats.item_errors = len(issues)
         return stats
+
+    def _event_with_run(self, event: Any, run_id: str) -> Any:
+        """Attach the source run id to stale/conflict evidence events."""
+
+        if event.event_type not in ("stale_revision", "revision_conflict"):
+            return event
+        detail = dict(event.detail)
+        detail["source_run_id"] = run_id
+        return ItemEvent(event.event_type, detail)
 
     # -- report queries ----------------------------------------------
     def latest_run_id(self) -> Optional[str]:
