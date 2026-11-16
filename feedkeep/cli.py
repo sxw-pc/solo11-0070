@@ -15,7 +15,7 @@ from .demo import main as demo_main
 from .fetcher import Fetcher
 from .ledger import Ledger
 from .report import ReportError, write_reports
-from .store import Store
+from .store import SourceLifecycleError, Store
 
 DEFAULT_DB = "data/feedkeep.sqlite3"
 DEFAULT_CONFIG = "configs/feeds.yaml"
@@ -41,6 +41,20 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--db", default=DEFAULT_DB, help="SQLite 归档文件")
     report.add_argument("--out", default=DEFAULT_REPORTS, help="报告输出目录")
     report.add_argument("--run-id", default=None, help="默认使用最近一轮")
+
+    pause = sub.add_parser("pause", help="暂停来源：停止请求，既有条目保持活跃")
+    pause.add_argument("--db", default=DEFAULT_DB, help="SQLite 归档文件")
+    pause.add_argument("--source", required=True, help="来源 id")
+
+    retire = sub.add_parser("retire", help="退役来源：结束当前归档纪元，条目转入退役清单")
+    retire.add_argument("--db", default=DEFAULT_DB, help="SQLite 归档文件")
+    retire.add_argument("--source", required=True, help="来源 id")
+
+    resume = sub.add_parser("resume", help="恢复来源：续用旧纪元或开启新纪元")
+    resume.add_argument("--db", default=DEFAULT_DB, help="SQLite 归档文件")
+    resume.add_argument("--source", required=True, help="来源 id")
+    resume.add_argument("--mode", choices=("epoch", "new-epoch"), default="epoch",
+                        help="epoch=恢复原纪元（默认）；new-epoch=保留旧档并开启新纪元")
 
     demo = sub.add_parser("demo", help="启动本地 mock 服务并完成自检")
     demo.add_argument("--out", default="reports/demo", help="demo 报告目录")
@@ -92,6 +106,26 @@ def command_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_lifecycle(args: argparse.Namespace) -> int:
+    if not Path(args.db).exists():
+        print(f"数据库不存在: {args.db}", file=sys.stderr)
+        return 2
+    clock = SystemClock()
+    with Store(args.db) as store:
+        try:
+            if args.command == "pause":
+                result = store.pause_source(args.source, clock.now_iso())
+            elif args.command == "retire":
+                result = store.retire_source(args.source, clock.now_iso())
+            else:
+                result = store.resume_source(args.source, clock.now_iso(), args.mode)
+        except SourceLifecycleError as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+    print(json.dumps(result.as_dict(), ensure_ascii=False, indent=2, sort_keys=True))
+    return 0
+
+
 def command_demo(args: argparse.Namespace) -> int:
     return demo_main(out_dir=args.out, port=args.port)
 
@@ -104,6 +138,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return command_fetch(args)
         if args.command == "report":
             return command_report(args)
+        if args.command in ("pause", "retire", "resume"):
+            return command_lifecycle(args)
         if args.command == "demo":
             return command_demo(args)
     except KeyboardInterrupt:

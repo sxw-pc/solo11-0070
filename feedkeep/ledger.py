@@ -33,8 +33,14 @@ class Ledger:
     def run(self, sources: Iterable[FeedSource],
             config_path: Optional[str] = None) -> RunSummary:
         configured = list(sources)
-        enabled = [source for source in configured if source.enabled]
-        self.store.sync_sources(configured)
+        blocked = self.store.sync_sources(configured)
+        # Paused/retired sources are skipped exactly like disabled ones: no
+        # request, no source_run, no missing reconciliation. Retirement can
+        # only be lifted by an explicit resume, never by config sync alone.
+        enabled = [
+            source for source in configured
+            if source.enabled and source.id not in blocked
+        ]
         started_at = self.clock.now_iso()
         run_id = self.store.create_run(started_at, config_path)
         records: list[SourceRunRecord] = []

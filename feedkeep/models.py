@@ -147,6 +147,56 @@ class SourceState:
 
 
 @dataclass(frozen=True)
+class SourceEventRecord:
+    """One operator-driven source lifecycle transition, persisted for audit."""
+
+    source_id: str
+    event_type: str  # paused | retired | resumed | new_epoch
+    epoch_id: int
+    occurred_at: str
+    last_run_id: Optional[str]  # latest finished run when the event happened
+    detail: Mapping[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "source_id": self.source_id,
+            "event_type": self.event_type,
+            "epoch_id": self.epoch_id,
+            "occurred_at": self.occurred_at,
+            "last_run_id": self.last_run_id,
+            "detail": dict(self.detail),
+        }
+
+
+@dataclass(frozen=True)
+class SourceLifecycleResult:
+    """Structured outcome of a pause/retire/resume command."""
+
+    source_id: str
+    action: str  # pause | retire | resume
+    changed: bool
+    enabled: bool
+    epoch_id: int
+    paused_at: Optional[str]
+    retired_at: Optional[str]
+    event: Optional[SourceEventRecord]
+    message: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "source_id": self.source_id,
+            "action": self.action,
+            "changed": self.changed,
+            "enabled": self.enabled,
+            "epoch_id": self.epoch_id,
+            "paused_at": self.paused_at,
+            "retired_at": self.retired_at,
+            "event": self.event.as_dict() if self.event else None,
+            "message": self.message,
+        }
+
+
+@dataclass(frozen=True)
 class FetchResult:
     """Outcome of one logical fetch (including retries)."""
 

@@ -114,13 +114,18 @@ backoff_base_ms: 250
 |---|---|
 | `python -m feedkeep fetch --config ... [--policy ...] [--db ...] [--quiet]` | 执行一轮抓取 |
 | `python -m feedkeep report [--db ...] [--out ...] [--run-id ...]` | 生成最近一轮或指定 run 的报告 |
+| `python -m feedkeep pause --db ... --source ID` | 暂停来源：停止请求，既有条目保持活跃 |
+| `python -m feedkeep retire --db ... --source ID` | 退役来源：结束当前归档纪元，条目转入退役清单 |
+| `python -m feedkeep resume --db ... --source ID [--mode epoch\|new-epoch]` | 恢复来源：续用旧纪元（默认）或开启新纪元 |
 | `python -m feedkeep demo [--out ...] [--port ...]` | 离线自检演示 |
+
+`pause` / `retire` / `resume` 输出结构化 JSON 结果（动作、是否变更、当前纪元、事件明细）。退役的来源不会被配置里的 `enabled: true` 静默复活，只能显式 `resume`；`--mode new-epoch` 保留旧纪元条目为历史，未来相同条目身份归入新纪元。
 
 | 退出码 | 含义 |
 |---|---|
 | `0` | 成功 / 全部来源未修改 |
 | `1` | 部分来源失败（run 状态 `partial`） |
-| `2` | 全部失败、无启用来源或没有可报告记录 |
+| `2` | 全部失败、无启用来源、没有可报告记录或生命周期转换被拒绝 |
 | `3` | 配置 / 策略校验失败 |
 | `130` | 用户中断 |
 
@@ -132,7 +137,7 @@ feedkeep/         采集、解析、归档、生命周期、报告、CLI
 mockserver/       回环 mock 发布服务 + 静态 fixture
 docs/             设计、合规边界、报告字段字典
 reports/          运行产物（内容被 .gitignore 忽略）
-tests/            105 项离线测试
+tests/            123 项离线测试
 ```
 
 ## 关键保证
@@ -141,7 +146,7 @@ tests/            105 项离线测试
 - **请求边界**：连接/读取超时、响应体上限、单源条目上限、同主机最小间隔、重试上限。
 - **格式边界**：XML 显式拒绝 `DOCTYPE` / `ENTITY`；JSON 仅接受 UTF-8；三格式统一条目模型。
 - **归档幂等**：条目身份优先使用发布方 id，其次规范化链接，最后 title+发布时间；同内容重复出现只更新 `last_seen_at`。
-- **生命周期**：`discovered` / `updated` / `missing` / `restored` 事件；成功抓取且未被截断时才做缺失对账。
+- **生命周期**：条目级 `discovered` / `updated` / `missing` / `restored` 事件，成功抓取且未被截断时才做缺失对账；来源级 `paused` / `retired` / `resumed` / `new_epoch` 事件，退役不伪装成空 feed、不计缺失、保留全部历史内容。
 - **可审计**：每个 run、每个 source_run、每次条目级错误、每个生命周期事件都落库；报告数组有固定排序规则。
 - **可复现**：fixture 由脚本生成并有 sha256 清单；注入时钟后，测试不比较真实时间。
 

@@ -13,13 +13,14 @@ reports/fetch-report-run-000001.md
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `schema_version` | int | 报告 schema 版本，当前为 1 |
+| `schema_version` | int | 报告 schema 版本，当前为 2 |
 | `generated_at` | string | 生成时刻，UTC 秒级 ISO-8601 |
 | `run` | object | 本轮汇总 |
 | `sources` | array | 每个启用来源的本轮明细 |
 | `item_issues` | array | 条目级错误 |
-| `events` | array | 本轮生命周期事件 |
-| `inventory` | array | 生成时刻各来源的当前归档清单 |
+| `events` | array | 本轮条目生命周期事件 |
+| `source_events` | array | 截至生成时刻的全部来源生命周期事件 |
+| `inventory` | array | 本轮结束时各来源的归档清单（含退役） |
 
 ## 2. `run` 字段
 
@@ -100,6 +101,7 @@ reports/fetch-report-run-000001.md
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `source_id` | string | 来源 |
+| `epoch_id` | int | 条目所属归档纪元 |
 | `item_key` | string | 条目稳定身份 |
 | `event_type` | string | `discovered` / `updated` / `missing` / `restored` |
 | `observed_at` | string | 事件发生时刻 |
@@ -112,18 +114,34 @@ reports/fetch-report-run-000001.md
 - missing：`last_content_hash`
 - restored：`content_hash`
 
-## 6. `inventory[]` 字段
+## 6. `source_events[]` 字段
+
+操作者驱动的来源生命周期时间线（暂停/退役/恢复），覆盖截至生成时刻的全部事件，因此历史 run 的报告也能区分“最后一次抓取结果”与“之后人为退役”。
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
 | `source_id` | string | 来源 |
-| `total` | int | 当前账本中该源条目总数 |
-| `active` | int | `missing_since IS NULL` 的条目数 |
-| `missing` | int | 当前缺失条目数 |
+| `event_type` | string | `paused` / `retired` / `resumed` / `new_epoch` |
+| `epoch_id` | int | 事件作用的归档纪元 |
+| `occurred_at` | string | 事件发生时刻 |
+| `last_run_id` | string/null | 事件发生前最近一个已完成的 run；尚无已完成 run 时为 null |
+| `detail` | object | 事件细节（如 `items_retired`、`previous_epoch`） |
 
-inventory 表示**报告生成时**的账本状态；较早 run 的报告如果稍后生成，inventory 可能包含后续 run 的影响。run 自身的计数不受影响。
+## 7. `inventory[]` 字段
 
-## 7. Markdown 结构
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `source_id` | string | 来源 |
+| `epoch_id` | int | 本轮结束时该来源的当前纪元 |
+| `lifecycle` | string | 本轮结束时的来源状态：`active` / `paused` / `retired` |
+| `total` | int | 截至本轮已归档的条目总数（含历史纪元） |
+| `active` | int | 本轮结束时活跃条目数 |
+| `missing` | int | 本轮结束时缺失条目数 |
+| `retired` | int | 本轮结束时已退役条目数（所属纪元已关闭） |
+
+inventory 按 **run 结束边界**重建：条目以首次出现的 run 判定是否存在，缺失状态重放到本轮为止的 `missing`/`restored` 事件，来源生命周期状态重放 `last_run_id` 早于本轮的 `source_events`（事件按 run 边界而非墙钟秒排序，同一秒内的“先 run 后退役”也能正确归属）。因此历史 run 的报告反映当时的状态，不受之后的退役或新纪元影响；`source_events` 时间线则始终完整呈现。已退役纪元的条目计入 `retired`，不再区分活跃/缺失。
+
+## 8. Markdown 结构
 
 顺序固定：
 
@@ -134,17 +152,19 @@ inventory 表示**报告生成时**的账本状态；较早 run 的报告如果�
 5. 来源错误；
 6. 条目级错误；
 7. 生命周期事件；
-8. 当前归档清单。
+8. 来源生命周期事件；
+9. 当前归档清单。
 
 表格单元格中的 `|` 会转义，换行会替换为空格；空值渲染为 `-`。没有内容时输出“无。”或用空表占位。
 
-## 8. 排序规则
+## 9. 排序规则
 
 | 数组 | 排序键 |
 |---|---|
 | `sources` | `source_id` 升序 |
 | `item_issues` | `source_id`、`item_index`、插入 id |
 | `events` | `source_id`、`item_key`、`event_type`、`observed_at` |
+| `source_events` | `occurred_at`、插入 id |
 | `inventory` | `source_id` 升序 |
 
 JSON 使用：
@@ -155,7 +175,7 @@ json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
 
 因此对象键顺序、数组顺序与末尾换行均稳定。
 
-## 9. 可复现性
+## 10. 可复现性
 
 在以下条件同时满足时，两次生成的 JSON/Markdown 字节一致：
 

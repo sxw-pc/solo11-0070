@@ -9,7 +9,7 @@ from typing import Any, Optional
 from .clock import Clock, SystemClock
 from .store import Store
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 RUN_FIELDS = (
     "run_id", "started_at", "finished_at", "status", "config_path",
     "sources_total", "sources_ok", "sources_not_modified", "sources_failed",
@@ -61,6 +61,7 @@ def build_report(store: Store, run_id: Optional[str] = None,
         "sources": sources,
         "item_issues": store.get_item_issues(selected),
         "events": events,
+        "source_events": store.get_source_events(),
         "inventory": store.inventory_for_run(selected),
     }
 
@@ -139,20 +140,36 @@ def render_markdown(report: dict[str, Any]) -> bytes:
         lines.append("无。")
     lines.extend(["", "## 生命周期事件", ""])
     if report["events"]:
-        lines.extend([_line(["来源", "条目", "事件", "时间"]), _line(["---"] * 4)])
+        lines.extend([_line(["来源", "纪元", "条目", "事件", "时间"]), _line(["---"] * 5)])
         for event in report["events"]:
             lines.append(_line([
-                event["source_id"], event["item_key"], event["event_type"],
-                event["observed_at"],
+                event["source_id"], event.get("epoch_id"), event["item_key"],
+                event["event_type"], event["observed_at"],
+            ]))
+    else:
+        lines.append("无。")
+    lines.extend(["", "## 来源生命周期事件", ""])
+    if report["source_events"]:
+        lines.extend([_line(["来源", "事件", "纪元", "时间"]), _line(["---"] * 4)])
+        for event in report["source_events"]:
+            lines.append(_line([
+                event["source_id"], event["event_type"], event["epoch_id"],
+                event["occurred_at"],
             ]))
     else:
         lines.append("无。")
     lines.extend(["", "## 当前归档清单", ""])
-    lines.extend([_line(["来源", "总数", "活跃", "缺失"]), _line(["---"] * 4)])
+    lines.extend([
+        _line(["来源", "纪元", "状态", "总数", "活跃", "缺失", "退役"]),
+        _line(["---"] * 7),
+    ])
     for row in report["inventory"]:
-        lines.append(_line([row["source_id"], row["total"], row["active"], row["missing"]]))
+        lines.append(_line([
+            row["source_id"], row["epoch_id"], row["lifecycle"], row["total"],
+            row["active"], row["missing"], row["retired"],
+        ]))
     if not report["inventory"]:
-        lines.append("| （无） | - | - | - |")
+        lines.append("| （无） | - | - | - | - | - | - |")
     return ("\n".join(lines) + "\n").encode("utf-8")
 
 

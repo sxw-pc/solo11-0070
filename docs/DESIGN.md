@@ -28,15 +28,25 @@ feeds.yaml + policy.yaml
 
 ## 2. 数据模型
 
-SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL）、`synchronous=FULL`。`schema_meta.schema_version` 记录结构版本；当前为 1，遇到更高版本直接拒绝，避免旧二进制写坏新库。
+SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL）、`synchronous=FULL`。`schema_meta.schema_version` 记录结构版本；当前为 2，遇到更高版本直接拒绝，避免旧二进制写坏新库。v1 数据库在打开时自动迁移：既有来源与条目归入纪元 1，条目主键扩展为 `(source_id, epoch_id, item_key)`。
 
 ### `sources`
 
 每个配置源的持久状态：
 
-- 配置快照：`name/url/format/enabled/tags_json/note`；
+- 配置快照：`name/url/format/enabled/tags_json/note`（`enabled` 只镜像配置文件，见第 6 节）；
 - 条件请求缓存：`etag/last_modified`；
-- 运行状态：`last_checked_at/last_success_at/consecutive_failures`。
+- 运行状态：`last_checked_at/last_success_at/consecutive_failures`；
+- 生命周期：`epoch_id`（当前归档纪元，从 1 开始）、`paused_at`、`retired_at`。
+
+### `source_events`
+
+操作者驱动的来源生命周期事件，只追加不修改：
+
+- `event_type`：`paused` / `retired` / `resumed` / `new_epoch`；
+- `epoch_id`：事件作用的纪元；
+- `occurred_at` 与 `last_run_id`（发生时最近一个已完成的 run，用于按 run 边界重放）；
+- `detail_json`（如退役时的 `items_retired`、新纪元的 `previous_epoch`）。
 
 ### `runs`
 
@@ -61,17 +71,20 @@ SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL�
 
 ### `items`
 
-条目账本，主键 `(source_id, item_key)`：
+条目账本，主键 `(source_id, epoch_id, item_key)`：
 
+- 所属纪元：`epoch_id`，观察写入时取自来源的当前纪元；
 - 身份与内容：`item_key/raw_id/title/link/summary/content/published_at`；
 - 作者、分类：排序稳定的 JSON 数组；
 - 内容指纹：`content_hash`；
 - 生命周期：`first_seen_at/last_seen_at/last_changed_at/missing_since`；
 - 来源 run：`first_run_id/last_run_id`。
 
+同一 `item_key` 可以出现在不同纪元：旧纪元行是封存的历史，新纪元行是当前清单，互不覆盖。
+
 ### `item_enclosures`
 
-每个条目可有多条附件元数据，按 `position` 排序。只保存 URL、MIME、声明长度，**从不下载二进制**。
+每个条目可有多条附件元数据，按 `position` 排序，外键 `(source_id, epoch_id, item_key)` 指向所属纪元的条目。只保存 URL、MIME、声明长度，**从不下载二进制**。
 
 ### `item_events`
 
@@ -82,7 +95,7 @@ SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL�
 - `missing`：一次完整成功抓取中未再出现；
 - `restored`：此前缺失的条目重新出现。
 
-表上有 `(source_id,item_key,run_id,event_type)` 唯一约束，防止同一 run 重放产生重复事件。
+每条事件带 `epoch_id`，不同纪元的相同 `item_key` 拥有各自独立的事件流。表上有 `(source_id,epoch_id,item_key,run_id,event_type)` 唯一约束，防止同一 run 重放产生重复事件。
 
 ### `item_issues`
 
@@ -144,7 +157,35 @@ item_key = "id:"   + sha256(raw_id)[:32]
 
 条目级解析错误不会让整源失败，但缺失对账仍以“本轮成功解析出的条目集合”为准。这是有意的：一个持续无法解析的条目会在生命周期上表现为缺失，同时错误码解释原因。
 
-## 6. 条件请求与重试
+## 6. 来源生命周期与归档纪元
+
+条目级状态机描述“条目在 feed 里是否还出现”；来源级生命周期描述操作者对整条归档来源的决定。两者独立：配置里的 `enabled` 只是“本轮是否请求”的快照，不能表达“暂时暂停”与“永久结束”的区别，因此显式转换通过 CLI 落库：
+
+```text
+                pause                resume (epoch)
+  active -----------------> paused ------------------> active
+    |                                                    ^
+    | retire             resume --mode epoch             |
+    +-----------------> retired -------------------------+
+                        |  resume --mode new-epoch
+                        v
+                  新纪元 active（旧纪元条目封存为历史）
+```
+
+- **pause**：只停请求。既有条目保持活跃，身份历史原样保留；恢复后继续同一纪元。配置 `enabled: false` 有同样的停请求效果，CLI `pause` 额外写入 `paused` 事件并持久化 `paused_at`，使暂停不被配置同步悄悄解除。
+- **retire**：在一个事务里写入 `retired_at` 与 `retired` 事件。当前纪元的条目立即退出活跃清单、进入退役清单；条目内容、附件与条目事件全部保留供审计。**不**伪造空 feed 观察：没有 source_run、不计 `items_missing`、不写条目事件。
+- **resume --mode epoch**（默认）：清除 `retired_at`/`paused_at`，沿用退役前的纪元，原条目重新进入活跃清单，写 `resumed` 事件。
+- **resume --mode new-epoch**：纪元号 +1，写 `new_epoch` 事件；旧纪元条目永久封存为历史，未来相同 `item_key` 归入新纪元、互不覆盖。同时清空条件请求缓存（ETag / Last-Modified），让新纪元第一轮获得完整 feed 重新归档。
+
+约束：
+
+- `sync_sources` 只更新配置快照列，绝不触碰 `paused_at/retired_at/epoch_id`；退役来源不会被普通 `enabled: true` 配置静默复活，只能显式 `resume`。
+- 已退役来源拒绝 `apply_observation`（防止进行中的旧 run 把观察写进已关闭的纪元）。
+- 生命周期转换在单个 SQLite 事务内完成，并校验该来源没有 `running` 状态的 source_run——转换只能发生在 run 边界，不与进行中的抓取交错。每个事件记录 `last_run_id`（发生时最近一个已完成的 run），报告按 run 边界重放事件，墙钟同一秒内的“先 run 后退役”也能正确归属。
+- 暂停/退役的来源在 run 中与配置禁用来源一样被跳过：不请求、不计入 `sources_total`。
+- 重复暂停、重复退役是幂等空操作；对活跃来源 `resume` 也是空操作。对未退役来源 `resume --mode new-epoch`、对已退役来源 `pause` 都会报错。
+
+## 7. 条件请求与重试
 
 每个源成功获取 200 后保存响应 ETag 与 Last-Modified。下一轮带：
 
@@ -176,7 +217,7 @@ min(backoff_base_ms * 2^n, 30_000ms)
 
 每次尝试前都经过同主机最小间隔限制；`attempts` 是实际发出的 HTTP 尝试次数。
 
-## 7. 请求边界
+## 8. 请求边界
 
 - 只允许 `http/https`，且 hostname 必须精确命中策略白名单；
 - 白名单本身只允许回环别名；
@@ -188,7 +229,7 @@ min(backoff_base_ms * 2^n, 30_000ms)
 - 响应流式读取，超过 `max_body_bytes` 立即停止并丢弃；
 - XML 预扫描拒绝 `DOCTYPE` 与 `ENTITY`，防外部实体/实体扩展。
 
-## 8. 配置错误与策略错误
+## 9. 配置错误与策略错误
 
 - `ConfigError` 汇总多个 `ConfigIssue`，每个 issue 包含稳定 code、文件名、字段路径、消息；
 - 配置文件缺失：`CFG_001`；
@@ -197,24 +238,25 @@ min(backoff_base_ms * 2^n, 30_000ms)
 - 缺字段/重复 id/非法 slug/未知字段/格式或数值非法：`CFG_004` 到 `CFG_013`；
 - 运行期白名单拒绝使用 `PolicyViolation`（`POLICY_001` 到 `POLICY_006`），仍会写入失败 source_run。
 
-## 9. 确定性与排序
+## 10. 确定性与排序
 
 - fixture 由 `feedkeep/mockdata.py` 生成；manifest 保存每个文件的 sha256；`--check` 检测手工漂移；
 - 所有时间通过注入的 `Clock` 获取；测试使用 `FixedClock`；
 - 报告 JSON 使用排序键与固定缩进；
-- 来源按 `source_id` 升序；条目问题按来源、序号、插入 id；事件按来源、key、类型、时间；inventory 按来源；
+- 来源按 `source_id` 升序；条目问题按来源、序号、插入 id；条目事件按来源、key、类型、时间；来源生命周期事件按 `occurred_at`、插入 id；inventory 按来源；
 - run id 递增，不依赖随机 UUID；
 - 报告中的 `generated_at`、run 时间与 `duration_ms` 属于时间相关字段，测试在固定时钟下仍字节稳定。
 
-## 10. 事务与失败隔离
+## 11. 事务与失败隔离
 
 - 一轮抓取的每个源独立完成解析与归档；坏源不阻断后续源；
 - `apply_observation` 在单个 SQLite 事务内写 item、附件、事件、条目问题和缺失状态；
 - source 成功状态与 source_run 在观察后写入；
 - 存储异常会转为该源的 `STORE_ERROR`，不影响其他源；
-- 整轮结束后统一计算 `ok / partial / failed` 并写 runs 汇总。
+- 整轮结束后统一计算 `ok / partial / failed` 并写 runs 汇总；
+- `pause/retire/resume` 各自在单个事务内更新来源状态并追加 `source_events`，且在事务内校验该来源没有 `running` 状态的 source_run，保证转换只发生在 run 边界。
 
-## 11. 测试策略
+## 12. 测试策略
 
 - 纯函数：配置、策略、格式嗅探、归一化、身份、指纹、生命周期；
 - 组件：三个 parser、Fetcher、Store；
