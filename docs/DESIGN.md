@@ -28,7 +28,7 @@ feeds.yaml + policy.yaml
 
 ## 2. 数据模型
 
-SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL）、`synchronous=FULL`。`schema_meta.schema_version` 记录结构版本；当前为 1，遇到更高版本直接拒绝，避免旧二进制写坏新库。
+SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL）、`synchronous=FULL`。`schema_meta.schema_version` 记录结构版本；当前为 2，遇到更高版本直接拒绝，避免旧二进制写坏新库。版本 1 的数据库在首次打开时自动迁移到版本 2：新增列与计数以 `ALTER TABLE` 补齐，`item_events` 因需要放宽 `CHECK` 约束而整表重建，旧事件行原样复制，审计数据不丢失。
 
 ### `sources`
 
@@ -66,7 +66,8 @@ SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL�
 - 身份与内容：`item_key/raw_id/title/link/summary/content/published_at`；
 - 作者、分类：排序稳定的 JSON 数组；
 - 内容指纹：`content_hash`；
-- 生命周期：`first_seen_at/last_seen_at/last_changed_at/missing_since`；
+- 生命周期：`first_seen_at/last_seen_at/last_changed_at/missing_since/retracted_at`；
+- `updated_at`：发布者声明的最后修改时间（Atom `<updated>`），用于撤回标记的新旧裁决，不进入内容指纹；
 - 来源 run：`first_run_id/last_run_id`。
 
 ### `item_enclosures`
@@ -75,14 +76,15 @@ SQLite 使用单文件、`foreign_keys=ON`、`journal_mode=DELETE`（关闭 WAL�
 
 ### `item_events`
 
-只允许四类事件：
+允许五类事件：
 
 - `discovered`：首次出现；
 - `updated`：内容指纹改变，detail 包含变更字段与新/旧指纹；
-- `missing`：一次完整成功抓取中未再出现；
-- `restored`：此前缺失的条目重新出现。
+- `missing`：一次完整成功抓取中未再出现（观察意义上的缺席）；
+- `restored`：此前缺失（missing）的条目重新出现；
+- `retracted`：发布者通过 Atom tombstone 明确撤回，detail 保留原始 `ref`、声明时间 `declared_at` 与撤回前 `last_content_hash`。
 
-表上有 `(source_id,item_key,run_id,event_type)` 唯一约束，防止同一 run 重放产生重复事件。
+表上有 `(source_id,item_key,run_id,event_type)` 唯一约束，防止同一 run 重放产生重复事件。一条目在同一 run 至多写一条终态事件。
 
 ### `item_issues`
 
@@ -129,6 +131,9 @@ item_key = "id:"   + sha256(raw_id)[:32]
                   missing     |  | restored
                               v  |
                             missing
+
+  active/missing --retracted--> retracted
+  retracted --entry reappears--> active（不产生 restored 事件）
 ```
 
 规则：
@@ -143,6 +148,28 @@ item_key = "id:"   + sha256(raw_id)[:32]
 - 截断时 source_run 的 `truncated=true`，`error_code=ITEMS_TRUNCATED`，但 source 状态仍可为 `ok`。
 
 条目级解析错误不会让整源失败，但缺失对账仍以“本轮成功解析出的条目集合”为准。这是有意的：一个持续无法解析的条目会在生命周期上表现为缺失，同时错误码解释原因。
+
+### 5.1 Atom tombstone（发布者明确撤回）
+
+Atom feed 根下命名空间为 `http://purl.org/atompub/tombstones/1.0` 的 `deleted-entry` 元素是发布者的明确删除指令，与“本轮没看到条目”的观察缺席严格区分：
+
+- parser 独立收集 tombstone，校验 `ref` 与 `when`；`when` 归一化为 UTC 秒级时间，缺 ref、缺 when、时间无法解析、同响应重复 ref 都进入 `item_issues`，不影响普通 entry；
+- `ref` 走与 Atom 显式 `id` 完全相同的身份规范化，因此 tombstone 与条目命中同一稳定 `item_key`；
+- 撤回裁决按**事件时间**而非 XML 顺序：tombstone 的 `when` 早于条目最新事实（优先 `updated_at`，否则 `last_changed_at`）时判定为陈旧（`TOMBSTONE_STALE` issue），保留较新条目，绝不按抓取顺序撤回新内容；时间相等视为有效；
+- 同一响应中 entry 与 tombstone 指向同一 ref 时，仍按 `when` 与 entry `updated` 分胜负：tombstone 新则撤回，entry 新则拒绝撤回并记 stale；
+- 有效撤回把条目移入 `retracted` 状态（写 `retracted_at=声明时间`、清 `missing_since`），写一条 `retracted` 事件，detail 带原始 `ref`、`declared_at` 与 `last_content_hash`；
+- 已撤回条目再次收到 tombstone 是幂等 no-op；未归档的 ref 没有可撤回对象，不产生事件；
+- 撤回后的条目重新以普通 entry 出现时回到 active，但**不写 `restored`**——撤回不是观察缺席，恢复语义只适用于普通 missing；
+- 截断响应不做 missing 对账，但已成功解析的有效 tombstone 仍独立处理，因为它是显式证据而非缺席推断。
+
+### 5.2 撤回内容保留策略
+
+每个来源通过 `retention_mode` 显式选择策略，缺省为 `retain_retracted_content`：
+
+- `retain_retracted_content`：保留原正文、摘要、作者、分类、enclosures 与 `content_hash`，仅状态变为 retracted，供内部历史查询，回答“发布者撤回了什么”；
+- `erase_retracted_content`：保留 `item_key/raw_id/content_hash` 与撤回事件，但清空正文、摘要、作者、分类、附件行等发布者内容，回答“这条目已撤回，内容按保留政策删除”。
+
+两种模式都把条目移出 active inventory 并保留明确撤回证据；清空内容不得被误报为抓取缺失。
 
 ## 6. 条件请求与重试
 

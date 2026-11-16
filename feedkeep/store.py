@@ -7,9 +7,10 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
-from .lifecycle import plan_missing, plan_transition
-from .models import (ApplyStats, Enclosure, ExistingItem, FeedSource, ItemIssue,
-                     NormalizedItem, RunCounts, SourceRunRecord, SourceState)
+from .lifecycle import plan_missing, plan_retraction, plan_transition
+from .models import (RETENTION_ERASE, RETENTION_RETAIN, ApplyStats, Enclosure,
+                     ExistingItem, FeedSource, ItemIssue, NormalizedItem,
+                     NormalizedTombstone, RunCounts, SourceRunRecord, SourceState)
 from .schema import initialize
 
 
@@ -124,14 +125,16 @@ class Store:
                 """INSERT INTO source_runs(
                    run_id,source_id,source_name,status,http_status,duration_ms,
                    body_bytes,body_sha256,etag,last_modified,attempts,items_total,
-                   items_new,items_updated,items_missing,items_restored,item_errors,
+                   items_new,items_updated,items_missing,items_restored,
+                   items_retracted,item_errors,
                    error_code,error_message,truncated,observed_at)
-                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (run_id, record.source_id, record.source_name, record.status,
                  record.http_status, record.duration_ms, record.body_bytes,
                  record.body_sha256, record.etag, record.last_modified, record.attempts,
                  record.items_total, record.items_new, record.items_updated,
-                 record.items_missing, record.items_restored, record.item_errors,
+                 record.items_missing, record.items_restored,
+                 record.items_retracted, record.item_errors,
                  record.error_code, record.error_message, int(record.truncated),
                  record.observed_at),
             )
@@ -155,6 +158,8 @@ class Store:
             categories=tuple(_json_load(row["categories_json"], [])),
             enclosures=self._enclosures(row["source_id"], row["item_key"]),
             content_hash=row["content_hash"], missing_since=row["missing_since"],
+            last_changed_at=row["last_changed_at"],
+            retracted_at=row["retracted_at"], updated_at=row["updated_at"],
         )
 
     def _insert_event(self, source_id: str, item_key: str, run_id: str,
@@ -180,11 +185,50 @@ class Store:
              for enc in item.enclosures],
         )
 
+    def _insert_issue(self, run_id: str, source_id: str, issue: ItemIssue) -> None:
+        self.conn.execute(
+            """INSERT INTO item_issues(run_id,source_id,item_index,code,message)
+               VALUES(?,?,?,?,?)""",
+            (run_id, source_id, issue.index, issue.code, issue.message),
+        )
+
+    def _apply_retraction(self, source_id: str, item_key: str, run_id: str,
+                          observed_at: str, tombstone: NormalizedTombstone,
+                          retention_mode: str) -> None:
+        """Move one item into the retracted state inside the open transaction."""
+
+        if retention_mode == RETENTION_ERASE:
+            # Keep identity, fingerprints and audit evidence, but remove the
+            # retracted publisher content from the archive.
+            self.conn.execute(
+                """UPDATE items SET title=NULL, link=NULL, summary=NULL, content=NULL,
+                   published_at=NULL, authors_json=?, categories_json=?,
+                   missing_since=NULL, retracted_at=?, last_run_id=?
+                   WHERE source_id=? AND item_key=?""",
+                ("[]", "[]", tombstone.declared_at, run_id, source_id, item_key),
+            )
+            self.conn.execute(
+                "DELETE FROM item_enclosures WHERE source_id=? AND item_key=?",
+                (source_id, item_key),
+            )
+        else:
+            # Retain the original body, enclosures and content_hash for
+            # internal historical queries; only the inventory state changes.
+            self.conn.execute(
+                """UPDATE items SET missing_since=NULL, retracted_at=?, last_run_id=?
+                   WHERE source_id=? AND item_key=?""",
+                (tombstone.declared_at, run_id, source_id, item_key),
+            )
+
     def apply_observation(self, source_id: str, run_id: str, observed_at: str,
                           items: Sequence[NormalizedItem], issues: Sequence[ItemIssue],
-                          truncated: bool = False) -> ApplyStats:
+                          truncated: bool = False,
+                          tombstones: Sequence[NormalizedTombstone] = (),
+                          retention_mode: str = RETENTION_RETAIN) -> ApplyStats:
         stats = ApplyStats()
         seen: set[str] = set()
+        retracted_keys: set[str] = set()
+        stale_issues: list[ItemIssue] = []
         with self.conn:
             rows = {
                 row["item_key"]: row
@@ -192,12 +236,53 @@ class Store:
                     "SELECT * FROM items WHERE source_id=?", (source_id,)
                 ).fetchall()
             }
+            markers = {marker.item_key: marker for marker in tombstones}
             for item in items:
                 if item.item_key in seen:
                     continue
                 seen.add(item.item_key)
                 row = rows.get(item.item_key)
                 existing = self._existing(row) if row is not None else None
+                marker = markers.pop(item.item_key, None)
+                if marker is not None:
+                    # Same response carries both an entry and a tombstone for
+                    # the same ref: the winner is decided by event time, never
+                    # by XML order.
+                    decision = plan_retraction(
+                        existing, marker, live_update=item.updated_at,
+                    )
+                    if decision.accepted:
+                        self._apply_retraction(
+                            source_id, item.item_key, run_id, observed_at,
+                            marker, retention_mode,
+                        )
+                        retracted_keys.add(item.item_key)
+                        if decision.event is not None:
+                            self._insert_event(
+                                source_id, item.item_key, run_id,
+                                observed_at, decision.event,
+                            )
+                        stats.items_retracted += 1
+                        continue
+                    if decision.stale or existing is None:
+                        if not decision.stale:
+                            # Nothing archived to withdraw: keep the live entry
+                            # and flag the unbacked marker for auditability.
+                            stale_issues.append(ItemIssue(
+                                index=marker.index, code="TOMBSTONE_STALE",
+                                message=(
+                                    f"删除标记 {marker.index} 没有可撤回的已归档条目，"
+                                    "保留同响应中的新条目"
+                                ),
+                            ))
+                        else:
+                            stale_issues.append(ItemIssue(
+                                index=marker.index, code="TOMBSTONE_STALE",
+                                message=(
+                                    f"删除标记 {marker.index} 声明时间 {marker.declared_at} "
+                                    "早于条目最新内容，已拒绝撤回"
+                                ),
+                            ))
                 transition = plan_transition(existing, item)
                 values = (item.raw_id, item.title, item.link, item.summary, item.content,
                           item.published_at, _json(list(item.authors)),
@@ -207,10 +292,11 @@ class Store:
                         """INSERT INTO items(
                            source_id,item_key,raw_id,title,link,summary,content,published_at,
                            authors_json,categories_json,content_hash,first_seen_at,last_seen_at,
-                           last_changed_at,missing_since,first_run_id,last_run_id)
-                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,?,?)""",
+                           last_changed_at,missing_since,retracted_at,updated_at,
+                           first_run_id,last_run_id)
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,?,?,?)""",
                         (source_id, item.item_key, *values, observed_at, observed_at,
-                         observed_at, run_id, run_id),
+                         observed_at, item.updated_at, run_id, run_id),
                     )
                     stats.items_new += 1
                 else:
@@ -218,9 +304,11 @@ class Store:
                     self.conn.execute(
                         """UPDATE items SET raw_id=?,title=?,link=?,summary=?,content=?,
                            published_at=?,authors_json=?,categories_json=?,content_hash=?,
-                           last_seen_at=?,last_changed_at=?,missing_since=NULL,last_run_id=?
+                           last_seen_at=?,last_changed_at=?,missing_since=NULL,
+                           retracted_at=NULL,updated_at=?,last_run_id=?
                            WHERE source_id=? AND item_key=?""",
-                        (*values, observed_at, last_changed, run_id, source_id, item.item_key),
+                        (*values, observed_at, last_changed, item.updated_at, run_id,
+                         source_id, item.item_key),
                     )
                     stats.items_updated += int(transition.is_updated)
                     stats.items_restored += int(transition.is_restored)
@@ -229,9 +317,44 @@ class Store:
                     self._insert_event(source_id, item.item_key, run_id, observed_at, event)
                 stats.items_seen += 1
 
+            # Tombstones whose ref did not also appear as a live entry. These
+            # are processed even on truncated responses: a parsed deletion
+            # marker is explicit evidence, not an absence inference.
+            for key in sorted(markers):
+                marker = markers[key]
+                row = rows.get(key)
+                existing = self._existing(row) if row is not None else None
+                decision = plan_retraction(existing, marker)
+                if decision.stale:
+                    stale_issues.append(ItemIssue(
+                        index=marker.index, code="TOMBSTONE_STALE",
+                        message=(
+                            f"删除标记 {marker.index} 声明时间 {marker.declared_at} "
+                            "早于条目最新内容，已拒绝撤回"
+                        ),
+                    ))
+                    continue
+                if not decision.accepted:
+                    # Unknown ref (nothing archived) or already retracted:
+                    # no state change and no terminal event.
+                    continue
+                self._apply_retraction(
+                    source_id, key, run_id, observed_at, marker, retention_mode,
+                )
+                retracted_keys.add(key)
+                if decision.event is not None:
+                    self._insert_event(
+                        source_id, key, run_id, observed_at, decision.event,
+                    )
+                stats.items_retracted += 1
+
             if not truncated:
                 for key, row in sorted(rows.items()):
-                    if key in seen or row["missing_since"] is not None:
+                    if key in seen or key in retracted_keys:
+                        continue
+                    if row["missing_since"] is not None:
+                        continue
+                    if row["retracted_at"] is not None:
                         continue
                     self.conn.execute(
                         "UPDATE items SET missing_since=? WHERE source_id=? AND item_key=?",
@@ -241,13 +364,9 @@ class Store:
                     self._insert_event(source_id, key, run_id, observed_at, plan_missing(existing))
                     stats.items_missing += 1
 
-            for issue in issues:
-                self.conn.execute(
-                    """INSERT INTO item_issues(run_id,source_id,item_index,code,message)
-                       VALUES(?,?,?,?,?)""",
-                    (run_id, source_id, issue.index, issue.code, issue.message),
-                )
-            stats.item_errors = len(issues)
+            for issue in list(issues) + stale_issues:
+                self._insert_issue(run_id, source_id, issue)
+            stats.item_errors = len(issues) + len(stale_issues)
         return stats
 
     # -- report queries ----------------------------------------------
@@ -287,10 +406,14 @@ class Store:
         rows = self.conn.execute(
             """SELECT sr.source_id,
                       COUNT(i.item_key) AS total,
-                      COALESCE(SUM(CASE WHEN i.item_key IS NOT NULL AND i.missing_since IS NULL
+                      COALESCE(SUM(CASE WHEN i.item_key IS NOT NULL
+                                        AND i.missing_since IS NULL
+                                        AND i.retracted_at IS NULL
                                         THEN 1 ELSE 0 END),0) AS active,
                       COALESCE(SUM(CASE WHEN i.missing_since IS NOT NULL
-                                        THEN 1 ELSE 0 END),0) AS missing
+                                        THEN 1 ELSE 0 END),0) AS missing,
+                      COALESCE(SUM(CASE WHEN i.retracted_at IS NOT NULL
+                                        THEN 1 ELSE 0 END),0) AS retracted
                FROM source_runs sr
                LEFT JOIN items i ON i.source_id=sr.source_id
                WHERE sr.run_id=?

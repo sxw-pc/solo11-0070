@@ -13,7 +13,7 @@ reports/fetch-report-run-000001.md
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `schema_version` | int | 报告 schema 版本，当前为 1 |
+| `schema_version` | int | 报告 schema 版本，当前为 2 |
 | `generated_at` | string | 生成时刻，UTC 秒级 ISO-8601 |
 | `run` | object | 本轮汇总 |
 | `sources` | array | 每个启用来源的本轮明细 |
@@ -38,6 +38,7 @@ reports/fetch-report-run-000001.md
 | `items_updated` | int | 内容指纹变化数 |
 | `items_missing` | int | 本轮新标记缺失数 |
 | `items_restored` | int | 从缺失恢复数 |
+| `items_retracted` | int | 发布者通过 tombstone 明确撤回数 |
 | `item_errors` | int | 条目级错误总数 |
 
 状态计算：
@@ -67,6 +68,7 @@ reports/fetch-report-run-000001.md
 | `items_updated` | int | 该源更新数 |
 | `items_missing` | int | 该源新缺失数 |
 | `items_restored` | int | 该源恢复数 |
+| `items_retracted` | int | 该源被明确撤回数 |
 | `item_errors` | int | 该源条目级错误数 |
 | `error_code` | string/null | 失败或告警码 |
 | `error_message` | string/null | 面向人的简短消息 |
@@ -90,10 +92,19 @@ reports/fetch-report-run-000001.md
 - `ATOM_ITEM_MISSING_ID`
 - `ATOM_ITEM_MISSING_TIME`
 - `ATOM_ITEM_BAD_DATE`
+- `ATOM_TOMBSTONE_MISSING_REF`
+- `ATOM_TOMBSTONE_MISSING_WHEN`
+- `ATOM_TOMBSTONE_BAD_WHEN`
+- `ATOM_TOMBSTONE_DUPLICATE_REF`
+- `TOMBSTONE_NO_REF`
+- `TOMBSTONE_DUPLICATE_KEY`
+- `TOMBSTONE_STALE`
 - `JSONFEED_ITEM_BAD_ID`
 - `JSONFEED_ITEM_BAD_DATE`
 - `ITEM_NO_IDENTITY`
 - `ITEM_DUPLICATE_KEY`
+
+其中 `TOMBSTONE_STALE` 表示删除标记的声明时间早于条目最新内容（或没有可撤回的已归档条目），撤回被拒绝、条目保留。
 
 ## 5. `events[]` 字段
 
@@ -101,7 +112,7 @@ reports/fetch-report-run-000001.md
 |---|---|---|
 | `source_id` | string | 来源 |
 | `item_key` | string | 条目稳定身份 |
-| `event_type` | string | `discovered` / `updated` / `missing` / `restored` |
+| `event_type` | string | `discovered` / `updated` / `missing` / `restored` / `retracted` |
 | `observed_at` | string | 事件发生时刻 |
 | `detail` | object | 事件细节 |
 
@@ -111,6 +122,7 @@ reports/fetch-report-run-000001.md
 - updated：`content_hash`、`previous_hash`、`changed_fields`
 - missing：`last_content_hash`
 - restored：`content_hash`
+- retracted：`ref`（发布者原始删除引用）、`declared_at`（UTC 归一化的声明时间）、`last_content_hash`（撤回前指纹）
 
 ## 6. `inventory[]` 字段
 
@@ -118,8 +130,11 @@ reports/fetch-report-run-000001.md
 |---|---|---|
 | `source_id` | string | 来源 |
 | `total` | int | 当前账本中该源条目总数 |
-| `active` | int | `missing_since IS NULL` 的条目数 |
-| `missing` | int | 当前缺失条目数 |
+| `active` | int | `missing_since IS NULL` 且 `retracted_at IS NULL` 的条目数 |
+| `missing` | int | 当前缺失（`missing_since` 非空）条目数 |
+| `retracted` | int | 被发布者明确撤回（`retracted_at` 非空）条目数 |
+
+`retracted` 与 `missing` 互斥：撤回是发布者明示删除，缺失只是观察上的暂时缺席；撤回条目不参与 active inventory，重新出现时回到 active 但不产生 `restored` 事件。
 
 inventory 表示**报告生成时**的账本状态；较早 run 的报告如果稍后生成，inventory 可能包含后续 run 的影响。run 自身的计数不受影响。
 

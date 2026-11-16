@@ -7,9 +7,10 @@ from feedkeep.identity import (
     changed_fields,
     content_hash,
     identify_item,
+    identify_tombstone,
     normalize_item,
 )
-from feedkeep.models import ExistingItem, ParsedItem
+from feedkeep.models import ExistingItem, ParsedItem, ParsedTombstone
 
 
 def _parsed(**overrides):
@@ -74,3 +75,33 @@ def test_changed_fields_are_sorted():
         enclosures=(), content_hash="old", missing_since=None,
     )
     assert changed_fields(existing, normalized) == ["content", "summary", "title"]
+
+
+def test_tombstone_ref_uses_same_key_as_explicit_item_id():
+    item_identity = identify_item(_parsed(raw_id="urn:feedkeep:atom:alpha"))
+    marker = identify_tombstone(
+        ParsedTombstone(raw_ref="urn:feedkeep:atom:alpha",
+                        declared_at="2024-02-01T00:00:00Z")
+    )
+    assert marker.item_key == item_identity.item_key
+    assert marker.raw_ref == "urn:feedkeep:atom:alpha"
+    assert marker.declared_at == "2024-02-01T00:00:00Z"
+
+
+def test_tombstone_ref_is_whitespace_normalized():
+    marker = identify_tombstone(
+        ParsedTombstone(raw_ref="  urn:feedkeep:atom:alpha\n",
+                        declared_at="2024-02-01T00:00:00Z")
+    )
+    assert marker.raw_ref == "urn:feedkeep:atom:alpha"
+    assert marker.item_key == identify_item(
+        _parsed(raw_id="urn:feedkeep:atom:alpha")
+    ).item_key
+
+
+def test_tombstone_without_usable_ref_fails():
+    with pytest.raises(IdentityError) as raised:
+        identify_tombstone(
+            ParsedTombstone(raw_ref="   ", declared_at="2024-02-01T00:00:00Z")
+        )
+    assert raised.value.code == "TOMBSTONE_NO_REF"

@@ -7,12 +7,13 @@ from typing import Iterable, Optional
 from .clock import Clock, SystemClock
 from .detect import FormatDetectionError, detect_format
 from .fetcher import Fetcher
-from .identity import IdentityError, normalize_item
+from .identity import IdentityError, identify_tombstone, normalize_item
 from .models import (
     ApplyStats,
     FeedSource,
     FetchResult,
     ItemIssue,
+    NormalizedTombstone,
     RunCounts,
     RunSummary,
     SourceRunRecord,
@@ -51,6 +52,7 @@ class Ledger:
             counts.items_updated += record.items_updated
             counts.items_missing += record.items_missing
             counts.items_restored += record.items_restored
+            counts.items_retracted += record.items_retracted
             counts.item_errors += record.item_errors
         status = self._run_status(counts)
         finished_at = self.clock.now_iso()
@@ -114,9 +116,33 @@ class Ledger:
                 continue
             seen.add(item.item_key)
             normalized.append(item)
+        # Tombstone refs go through the same identity layer as explicit ids.
+        # They are not subject to the item cap: deletion evidence must not be
+        # dropped just because a feed contains many live entries.
+        normalized_tombstones: list[NormalizedTombstone] = []
+        tombstone_keys: set[str] = set()
+        for index, marker in enumerate(parsed.tombstones):
+            try:
+                resolved = identify_tombstone(marker)
+            except IdentityError as exc:
+                issues.append(ItemIssue(index, exc.code, exc.message))
+                continue
+            normalized_marker = NormalizedTombstone(
+                item_key=resolved.item_key, raw_ref=resolved.raw_ref,
+                declared_at=resolved.declared_at, index=index,
+            )
+            if normalized_marker.item_key in tombstone_keys:
+                issues.append(ItemIssue(
+                    index, "TOMBSTONE_DUPLICATE_KEY",
+                    f"删除标记 {index} 与同响应中的其他标记身份冲突",
+                ))
+                continue
+            tombstone_keys.add(normalized_marker.item_key)
+            normalized_tombstones.append(normalized_marker)
         try:
             stats = self.store.apply_observation(
                 source.id, run_id, observed_at, normalized, issues, truncated=truncated,
+                tombstones=normalized_tombstones, retention_mode=source.retention_mode,
             )
         except Exception as exc:
             self.store.mark_failure(source.id, observed_at)
@@ -145,6 +171,7 @@ class Ledger:
             attempts=result.attempts, items_total=stats.items_seen,
             items_new=stats.items_new, items_updated=stats.items_updated,
             items_missing=stats.items_missing, items_restored=stats.items_restored,
+            items_retracted=stats.items_retracted,
             item_errors=stats.item_errors,
             error_code=error_code if error_code is not None else result.error_code,
             error_message=error_message if error_message is not None else result.error_message,

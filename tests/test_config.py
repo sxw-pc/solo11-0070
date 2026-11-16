@@ -132,3 +132,38 @@ def test_validation_mentions_file_and_path(tmp_path, write_feeds, source_factory
     assert "CFG_003" in rendered
     assert "feeds.yaml" in rendered
     assert "feeds[0].url" in rendered
+
+
+def test_retention_mode_defaults_to_retain(tmp_path, write_feeds, source_factory,
+                                           mock_server, write_policy):
+    path = write_feeds([source_factory(mock_server)])
+    feeds = load_feeds(path, load_policy(write_policy()))
+    assert feeds[0].retention_mode == "retain_retracted_content"
+
+
+def test_retention_mode_accepts_erase(tmp_path, write_feeds, source_factory,
+                                      mock_server, write_policy):
+    import yaml
+    path = write_feeds([source_factory(mock_server)])
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["feeds"][0]["retention_mode"] = "erase_retracted_content"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                    encoding="utf-8")
+    feeds = load_feeds(path, load_policy(write_policy()))
+    assert feeds[0].retention_mode == "erase_retracted_content"
+
+
+def test_retention_mode_rejects_unknown_value(tmp_path, write_feeds, source_factory,
+                                              mock_server, write_policy):
+    import yaml
+    path = write_feeds([source_factory(mock_server)])
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    data["feeds"][0]["retention_mode"] = "shred-everything"
+    path.write_text(yaml.safe_dump(data, allow_unicode=True, sort_keys=False),
+                    encoding="utf-8")
+    with pytest.raises(ConfigError) as raised:
+        load_feeds(path, load_policy(write_policy()))
+    assert any(
+        issue.code == "CFG_009" and issue.path.endswith("retention_mode")
+        for issue in raised.value.issues
+    )

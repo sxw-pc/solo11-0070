@@ -9,12 +9,13 @@ from typing import Any, Iterable
 
 import yaml
 
-from .models import FeedSource
+from .models import RETENTION_MODES, FeedSource
 from .policy import LOOPBACK_HOSTS, Policy, PolicyViolation, normalize_allowed_hosts
 
 FORMATS = ("auto", "rss", "atom", "jsonfeed")
 ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
-FEED_KEYS = ("id", "name", "url", "format", "enabled", "tags", "note")
+FEED_KEYS = ("id", "name", "url", "format", "enabled", "tags", "note", "retention_mode")
+REQUIRED_FEED_KEYS = ("id", "name", "url", "format", "enabled", "tags", "note")
 POLICY_KEYS = (
     "version", "allowed_hosts", "timeout_seconds", "max_body_bytes",
     "max_items_per_feed", "min_interval_ms", "max_retries", "backoff_base_ms",
@@ -138,7 +139,7 @@ def _validate_feed(raw: Any, index: int, path: Path, policy: Policy) -> tuple[Fe
     if not isinstance(raw, dict):
         return None, [_issue("CFG_005", path, prefix, "每个订阅源必须是映射对象")]
     issues.extend(_unknown_keys(raw, FEED_KEYS, path, prefix))
-    for key in FEED_KEYS:
+    for key in REQUIRED_FEED_KEYS:
         if key not in raw:
             issues.append(_issue("CFG_004", path, f"{prefix}.{key}", "缺少必填字段"))
     if issues:
@@ -146,6 +147,7 @@ def _validate_feed(raw: Any, index: int, path: Path, policy: Policy) -> tuple[Fe
 
     feed_id, name, url = raw["id"], raw["name"], raw["url"]
     fmt, enabled, tags, note = raw["format"], raw["enabled"], raw["tags"], raw["note"]
+    retention_mode = raw.get("retention_mode", RETENTION_MODES[0])
     if not isinstance(feed_id, str) or not ID_PATTERN.fullmatch(feed_id):
         issues.append(_issue("CFG_007", path, f"{prefix}.id", "必须是 slug（小写字母/数字/-/_）"))
     if not isinstance(name, str) or not name.strip():
@@ -165,6 +167,9 @@ def _validate_feed(raw: Any, index: int, path: Path, policy: Policy) -> tuple[Fe
         issues.append(_issue("CFG_005", path, f"{prefix}.tags", "必须是字符串列表"))
     if not isinstance(note, str):
         issues.append(_issue("CFG_005", path, f"{prefix}.note", "必须是字符串"))
+    if retention_mode not in RETENTION_MODES:
+        issues.append(_issue("CFG_009", path, f"{prefix}.retention_mode",
+                             f"必须是 {RETENTION_MODES!r} 之一"))
     if issues:
         return None, issues
     return FeedSource(
@@ -175,6 +180,7 @@ def _validate_feed(raw: Any, index: int, path: Path, policy: Policy) -> tuple[Fe
         enabled=enabled,
         tags=tuple(dict.fromkeys(tags)),
         note=note,
+        retention_mode=retention_mode,
     ), []
 
 

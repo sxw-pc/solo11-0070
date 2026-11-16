@@ -7,7 +7,8 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
-from .models import NormalizedItem, ParsedItem
+from .models import (NormalizedItem, NormalizedTombstone, ParsedItem,
+                     ParsedTombstone)
 from .parsers.common import normalize_text, normalize_title, normalize_url
 
 
@@ -48,6 +49,23 @@ def identify_item(item: ParsedItem) -> ItemIdentity:
     raise IdentityError("ITEM_NO_IDENTITY", "条目缺少可用身份（id / link / title+date）")
 
 
+def identify_tombstone(marker: ParsedTombstone) -> NormalizedTombstone:
+    """Normalize a tombstone ref exactly like an explicit Atom id.
+
+    Tombstones only carry a ref, so link/title fallbacks never apply: a ref
+    that normalizes to empty is an identity-level item issue.
+    """
+
+    raw_ref = normalize_text(marker.raw_ref, collapse=True)
+    if not raw_ref:
+        raise IdentityError("TOMBSTONE_NO_REF", "删除标记缺少可用 ref")
+    return NormalizedTombstone(
+        item_key="id:" + _digest(raw_ref),
+        raw_ref=raw_ref,
+        declared_at=marker.declared_at,
+    )
+
+
 def canonical_content(item: ParsedItem) -> str:
     payload: dict[str, Any] = {
         "title": normalize_title(item.title),
@@ -80,6 +98,7 @@ def normalize_item(item: ParsedItem) -> NormalizedItem:
         categories=tuple(item.categories),
         enclosures=tuple(item.enclosures),
         content_hash=content_hash(item),
+        updated_at=normalize_text(item.updated_at),
     )
 
 

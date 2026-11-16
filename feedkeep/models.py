@@ -17,6 +17,12 @@ class FeedSource:
     enabled: bool
     tags: tuple[str, ...]
     note: str
+    retention_mode: str = "retain_retracted_content"
+
+
+RETENTION_RETAIN = "retain_retracted_content"
+RETENTION_ERASE = "erase_retracted_content"
+RETENTION_MODES = (RETENTION_RETAIN, RETENTION_ERASE)
 
 
 @dataclass(frozen=True)
@@ -50,6 +56,17 @@ class ParsedItem:
     authors: tuple[str, ...] = ()
     categories: tuple[str, ...] = ()
     enclosures: tuple[Enclosure, ...] = ()
+    # Publisher-declared last modification time (Atom <updated>); None for
+    # formats without an equivalent field. Excluded from the content fingerprint.
+    updated_at: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ParsedTombstone:
+    """An Atom Publishing Protocol deleted-entry marker before identity resolution."""
+
+    raw_ref: str
+    declared_at: str
 
 
 @dataclass(frozen=True)
@@ -69,6 +86,17 @@ class ParsedFeed:
     format: str
     items: tuple[ParsedItem, ...]
     issues: tuple[ItemIssue, ...] = ()
+    tombstones: tuple[ParsedTombstone, ...] = ()
+
+
+@dataclass(frozen=True)
+class NormalizedTombstone:
+    """A deletion marker whose ref follows the same identity rules as an explicit id."""
+
+    item_key: str
+    raw_ref: str
+    declared_at: str
+    index: int = 0
 
 
 @dataclass(frozen=True)
@@ -86,6 +114,7 @@ class NormalizedItem:
     categories: tuple[str, ...]
     enclosures: tuple[Enclosure, ...]
     content_hash: str
+    updated_at: Optional[str] = None
 
     def comparable_fields(self) -> dict[str, Any]:
         return {
@@ -116,6 +145,9 @@ class ExistingItem:
     enclosures: tuple[Enclosure, ...]
     content_hash: str
     missing_since: Optional[str]
+    last_changed_at: Optional[str] = None
+    retracted_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
     def comparable_fields(self) -> dict[str, Any]:
         return {
@@ -183,6 +215,7 @@ class ApplyStats:
     items_updated: int = 0
     items_missing: int = 0
     items_restored: int = 0
+    items_retracted: int = 0
     item_errors: int = 0
 
 
@@ -197,6 +230,7 @@ class RunCounts:
     items_updated: int = 0
     items_missing: int = 0
     items_restored: int = 0
+    items_retracted: int = 0
     item_errors: int = 0
 
     def as_dict(self) -> dict[str, int]:
@@ -210,6 +244,7 @@ class RunCounts:
             "items_updated": self.items_updated,
             "items_missing": self.items_missing,
             "items_restored": self.items_restored,
+            "items_retracted": self.items_retracted,
             "item_errors": self.item_errors,
         }
 
@@ -231,6 +266,7 @@ class SourceRunRecord:
     items_updated: int
     items_missing: int
     items_restored: int
+    items_retracted: int
     item_errors: int
     error_code: Optional[str]
     error_message: Optional[str]
@@ -254,6 +290,7 @@ class SourceRunRecord:
             "items_updated": self.items_updated,
             "items_missing": self.items_missing,
             "items_restored": self.items_restored,
+            "items_retracted": self.items_retracted,
             "item_errors": self.item_errors,
             "error_code": self.error_code,
             "error_message": self.error_message,

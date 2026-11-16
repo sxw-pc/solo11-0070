@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import sqlite3
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
+# Base DDL is always safe to run: CREATE TABLE/INDEX IF NOT EXISTS never
+# touches a table that already exists in an older database. Version-specific
+# column and constraint changes are applied by the explicit migrations below.
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_meta (
     key TEXT PRIMARY KEY,
@@ -42,6 +45,7 @@ CREATE TABLE IF NOT EXISTS runs (
     items_updated INTEGER NOT NULL DEFAULT 0,
     items_missing INTEGER NOT NULL DEFAULT 0,
     items_restored INTEGER NOT NULL DEFAULT 0,
+    items_retracted INTEGER NOT NULL DEFAULT 0,
     item_errors INTEGER NOT NULL DEFAULT 0
 );
 
@@ -63,6 +67,7 @@ CREATE TABLE IF NOT EXISTS source_runs (
     items_updated INTEGER NOT NULL DEFAULT 0,
     items_missing INTEGER NOT NULL DEFAULT 0,
     items_restored INTEGER NOT NULL DEFAULT 0,
+    items_retracted INTEGER NOT NULL DEFAULT 0,
     item_errors INTEGER NOT NULL DEFAULT 0,
     error_code TEXT,
     error_message TEXT,
@@ -87,6 +92,8 @@ CREATE TABLE IF NOT EXISTS items (
     last_seen_at TEXT NOT NULL,
     last_changed_at TEXT,
     missing_since TEXT,
+    retracted_at TEXT,
+    updated_at TEXT,
     first_run_id TEXT NOT NULL REFERENCES runs(id),
     last_run_id TEXT NOT NULL REFERENCES runs(id),
     PRIMARY KEY (source_id, item_key)
@@ -108,7 +115,8 @@ CREATE TABLE IF NOT EXISTS item_events (
     source_id TEXT NOT NULL REFERENCES sources(id),
     item_key TEXT NOT NULL,
     run_id TEXT NOT NULL REFERENCES runs(id),
-    event_type TEXT NOT NULL CHECK (event_type IN ('discovered', 'updated', 'missing', 'restored')),
+    event_type TEXT NOT NULL CHECK (event_type IN
+        ('discovered', 'updated', 'missing', 'restored', 'retracted')),
     observed_at TEXT NOT NULL,
     detail_json TEXT NOT NULL,
     UNIQUE (source_id, item_key, run_id, event_type)
@@ -117,7 +125,7 @@ CREATE TABLE IF NOT EXISTS item_events (
 CREATE TABLE IF NOT EXISTS item_issues (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
-    source_id TEXT NOT NULL REFERENCES sources(id),
+    source_id TEXT NOT NULL,
     item_index INTEGER NOT NULL,
     code TEXT NOT NULL,
     message TEXT NOT NULL
@@ -128,6 +136,72 @@ CREATE INDEX IF NOT EXISTS idx_items_source_missing
 CREATE INDEX IF NOT EXISTS idx_events_run ON item_events(run_id);
 CREATE INDEX IF NOT EXISTS idx_issues_run ON item_issues(run_id);
 """
+
+# Indexes whose columns only exist from a specific schema version onward.
+# They are created after migrations have brought an older database up to date.
+VERSION_INDEXES = {
+    2: (
+        "CREATE INDEX IF NOT EXISTS idx_items_source_retracted "
+        "ON items(source_id, retracted_at)",
+    ),
+}
+
+
+def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
+    """Upgrade a version-1 database in place without losing audit rows."""
+
+    # New per-item columns: explicit retraction timestamp and the publisher's
+    # declared modification time used to reject stale tombstones.
+    conn.execute("ALTER TABLE items ADD COLUMN retracted_at TEXT")
+    conn.execute("ALTER TABLE items ADD COLUMN updated_at TEXT")
+    # Run-level retraction counters.
+    conn.execute(
+        "ALTER TABLE runs ADD COLUMN items_retracted INTEGER NOT NULL DEFAULT 0"
+    )
+    conn.execute(
+        "ALTER TABLE source_runs ADD COLUMN items_retracted INTEGER NOT NULL DEFAULT 0"
+    )
+    # SQLite cannot alter a CHECK constraint: rebuild item_events so the new
+    # 'retracted' event type is allowed. Existing event rows are copied verbatim.
+    conn.executescript(
+        """
+        CREATE TABLE item_events_v2 (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source_id TEXT NOT NULL REFERENCES sources(id),
+            item_key TEXT NOT NULL,
+            run_id TEXT NOT NULL REFERENCES runs(id),
+            event_type TEXT NOT NULL CHECK (event_type IN
+                ('discovered', 'updated', 'missing', 'restored', 'retracted')),
+            observed_at TEXT NOT NULL,
+            detail_json TEXT NOT NULL,
+            UNIQUE (source_id, item_key, run_id, event_type)
+        );
+        INSERT INTO item_events_v2(
+            id, source_id, item_key, run_id, event_type, observed_at, detail_json)
+        SELECT id, source_id, item_key, run_id, event_type, observed_at, detail_json
+        FROM item_events;
+        DROP TABLE item_events;
+        ALTER TABLE item_events_v2 RENAME TO item_events;
+        CREATE INDEX IF NOT EXISTS idx_events_run ON item_events(run_id);
+        """
+    )
+    conn.execute(
+        "UPDATE schema_meta SET value=? WHERE key='schema_version'",
+        (str(SCHEMA_VERSION),),
+    )
+    conn.commit()
+
+
+def _apply_migrations(conn: sqlite3.Connection, version: int) -> None:
+    current = version
+    if current < 2:
+        _migrate_v1_to_v2(conn)
+        current = 2
+    for target, statements in sorted(VERSION_INDEXES.items()):
+        if target > version:
+            for statement in statements:
+                conn.execute(statement)
+    conn.commit()
 
 
 def initialize(conn: sqlite3.Connection) -> None:
@@ -144,8 +218,15 @@ def initialize(conn: sqlite3.Connection) -> None:
             "INSERT INTO schema_meta(key, value) VALUES('schema_version', ?)",
             (str(SCHEMA_VERSION),),
         )
+        for statements in VERSION_INDEXES.values():
+            for statement in statements:
+                conn.execute(statement)
         conn.commit()
-    elif int(row["value"]) > SCHEMA_VERSION:
+        return
+    version = int(row["value"])
+    if version > SCHEMA_VERSION:
         raise RuntimeError(
             f"database schema {row['value']} is newer than supported {SCHEMA_VERSION}"
         )
+    if version < SCHEMA_VERSION:
+        _apply_migrations(conn, version)

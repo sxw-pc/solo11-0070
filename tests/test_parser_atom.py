@@ -6,6 +6,17 @@ from feedkeep.mockdata import generate_all
 from feedkeep.parsers import ParseError
 from feedkeep.parsers.atom import parse_atom
 
+ATOM_NS = 'xmlns="http://www.w3.org/2005/Atom"'
+TOMB_NS = 'xmlns:at="http://purl.org/atompub/tombstones/1.0"'
+
+
+def _feed(body: str) -> bytes:
+    return (
+        f'<?xml version="1.0" encoding="utf-8"?><feed {ATOM_NS} {TOMB_NS}>'
+        f"<title>t</title><id>urn:f</id><updated>2024-02-01T00:00:00Z</updated>"
+        f"{body}</feed>"
+    ).encode("utf-8")
+
 
 def test_parses_basic_atom():
     result = parse_atom(generate_all()["atom_basic.xml"])
@@ -62,3 +73,96 @@ def test_wrong_root_rejected():
     with pytest.raises(ParseError) as raised:
         parse_atom(generate_all()["rss_basic.xml"])
     assert raised.value.code == "PARSE_FORMAT_MISMATCH"
+
+
+def test_entry_exposes_normalized_updated_at():
+    result = parse_atom(generate_all()["atom_basic.xml"])
+    alpha = next(item for item in result.items if item.raw_id.endswith(":alpha"))
+    assert alpha.updated_at == "2024-01-02T08:00:00Z"
+
+
+def test_tombstone_ref_and_when_are_collected():
+    body = _feed(
+        '<at:deleted-entry ref="urn:feedkeep:atom:alpha" '
+        'when="2024-02-01T00:00:00Z" />'
+    )
+    result = parse_atom(body)
+    assert result.items == ()
+    assert len(result.tombstones) == 1
+    marker = result.tombstones[0]
+    assert marker.raw_ref == "urn:feedkeep:atom:alpha"
+    assert marker.declared_at == "2024-02-01T00:00:00Z"
+    assert result.issues == ()
+
+
+def test_tombstone_when_normalized_to_utc():
+    body = _feed(
+        '<at:deleted-entry ref="urn:feedkeep:atom:alpha" '
+        'when="2024-02-01T09:30:00+09:30" />'
+    )
+    result = parse_atom(body)
+    assert result.tombstones[0].declared_at == "2024-02-01T00:00:00Z"
+
+
+def test_tombstone_coexists_with_regular_entries():
+    body = _feed(
+        '<entry><id>urn:feedkeep:atom:beta</id>'
+        '<updated>2024-01-03T10:30:00Z</updated></entry>'
+        '<at:deleted-entry ref="urn:feedkeep:atom:alpha" '
+        'when="2024-02-01T00:00:00Z" />'
+    )
+    result = parse_atom(body)
+    assert [item.raw_id for item in result.items] == ["urn:feedkeep:atom:beta"]
+    assert [marker.raw_ref for marker in result.tombstones] == [
+        "urn:feedkeep:atom:alpha",
+    ]
+
+
+def test_tombstone_missing_ref_is_item_issue():
+    body = _feed('<at:deleted-entry when="2024-02-01T00:00:00Z" />')
+    result = parse_atom(body)
+    assert result.tombstones == ()
+    assert result.issues[0].code == "ATOM_TOMBSTONE_MISSING_REF"
+
+
+def test_tombstone_missing_when_is_item_issue():
+    body = _feed('<at:deleted-entry ref="urn:feedkeep:atom:alpha" />')
+    result = parse_atom(body)
+    assert result.tombstones == ()
+    assert result.issues[0].code == "ATOM_TOMBSTONE_MISSING_WHEN"
+
+
+def test_tombstone_bad_when_is_item_issue():
+    body = _feed(
+        '<at:deleted-entry ref="urn:feedkeep:atom:alpha" when="not-a-date" />'
+    )
+    result = parse_atom(body)
+    assert result.tombstones == ()
+    assert result.issues[0].code == "ATOM_TOMBSTONE_BAD_WHEN"
+
+
+def test_duplicate_tombstone_ref_keeps_first_and_flags_second():
+    body = _feed(
+        '<at:deleted-entry ref="urn:feedkeep:atom:alpha" '
+        'when="2024-02-01T00:00:00Z" />'
+        '<at:deleted-entry ref="urn:feedkeep:atom:alpha" '
+        'when="2024-02-02T00:00:00Z" />'
+    )
+    result = parse_atom(body)
+    assert len(result.tombstones) == 1
+    assert result.tombstones[0].declared_at == "2024-02-01T00:00:00Z"
+    assert [(issue.index, issue.code) for issue in result.issues] == [
+        (1, "ATOM_TOMBSTONE_DUPLICATE_REF"),
+    ]
+
+
+def test_deleted_entry_outside_tombstones_namespace_is_ignored():
+    body = (
+        f'<?xml version="1.0" encoding="utf-8"?><feed {ATOM_NS}>'
+        "<title>t</title><id>urn:f</id><updated>2024-02-01T00:00:00Z</updated>"
+        '<deleted-entry ref="urn:feedkeep:atom:alpha" '
+        'when="2024-02-01T00:00:00Z" /></feed>'
+    ).encode("utf-8")
+    result = parse_atom(body)
+    assert result.tombstones == ()
+    assert result.issues == ()

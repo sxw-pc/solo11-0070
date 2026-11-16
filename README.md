@@ -132,7 +132,7 @@ feedkeep/         采集、解析、归档、生命周期、报告、CLI
 mockserver/       回环 mock 发布服务 + 静态 fixture
 docs/             设计、合规边界、报告字段字典
 reports/          运行产物（内容被 .gitignore 忽略）
-tests/            105 项离线测试
+tests/            150 项离线测试
 ```
 
 ## 关键保证
@@ -141,7 +141,7 @@ tests/            105 项离线测试
 - **请求边界**：连接/读取超时、响应体上限、单源条目上限、同主机最小间隔、重试上限。
 - **格式边界**：XML 显式拒绝 `DOCTYPE` / `ENTITY`；JSON 仅接受 UTF-8；三格式统一条目模型。
 - **归档幂等**：条目身份优先使用发布方 id，其次规范化链接，最后 title+发布时间；同内容重复出现只更新 `last_seen_at`。
-- **生命周期**：`discovered` / `updated` / `missing` / `restored` 事件；成功抓取且未被截断时才做缺失对账。
+- **生命周期**：`discovered` / `updated` / `missing` / `restored` / `retracted` 事件；成功抓取且未被截断时才做缺失对账；Atom tombstone 按声明时间裁决，把发布者明确撤回与普通缺席分开，并支持保留/清除两种内容策略。
 - **可审计**：每个 run、每个 source_run、每次条目级错误、每个生命周期事件都落库；报告数组有固定排序规则。
 - **可复现**：fixture 由脚本生成并有 sha256 清单；注入时钟后，测试不比较真实时间。
 

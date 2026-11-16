@@ -5,13 +5,15 @@ from __future__ import annotations
 from typing import Optional
 from xml.etree import ElementTree as ET
 
-from ..models import Enclosure, ItemIssue, ParsedFeed, ParsedItem
+from ..models import (Enclosure, ItemIssue, ParsedFeed, ParsedItem,
+                      ParsedTombstone)
 from .common import (
     ParseError,
-    child,
     child_text,
     children,
     element_text,
+    local_name,
+    normalize_text,
     normalize_title,
     normalize_url,
     parse_declared_length,
@@ -20,6 +22,8 @@ from .common import (
     require_root,
     unique_strings,
 )
+
+TOMBSTONES_NS = "http://purl.org/atompub/tombstones/1.0"
 
 
 def _entry_link(entry: ET.Element) -> Optional[str]:
@@ -85,7 +89,31 @@ def _parse_entry(entry: ET.Element, index: int) -> ParsedItem:
         authors=authors,
         categories=categories,
         enclosures=_enclosures(entry),
+        updated_at=updated,
     )
+
+
+def _is_tombstone(node: ET.Element) -> bool:
+    return local_name(node.tag) == "deleted-entry" and (
+        node.tag.startswith("{") and node.tag[1:].split("}", 1)[0] == TOMBSTONES_NS
+    )
+
+
+def _parse_tombstone(node: ET.Element, index: int) -> ParsedTombstone:
+    raw_ref = normalize_text(node.get("ref"), collapse=True)
+    if not raw_ref:
+        raise ParseError("ATOM_TOMBSTONE_MISSING_REF",
+                         f"删除标记 {index} 缺少 ref")
+    when_raw = node.get("when")
+    if not normalize_text(when_raw):
+        raise ParseError("ATOM_TOMBSTONE_MISSING_WHEN",
+                         f"删除标记 {index} 缺少 when")
+    try:
+        when = parse_iso_datetime(when_raw)
+    except (TypeError, ValueError) as exc:
+        raise ParseError("ATOM_TOMBSTONE_BAD_WHEN",
+                         f"删除标记 {index} 的 when 无法解析") from exc
+    return ParsedTombstone(raw_ref=raw_ref, declared_at=when)
 
 
 def parse_atom(body: bytes) -> ParsedFeed:
@@ -93,9 +121,29 @@ def parse_atom(body: bytes) -> ParsedFeed:
     require_root(root, "feed")
     items: list[ParsedItem] = []
     issues: list[ItemIssue] = []
+    tombstones: list[ParsedTombstone] = []
     for index, entry in enumerate(children(root, "entry")):
         try:
             items.append(_parse_entry(entry, index))
         except ParseError as exc:
             issues.append(ItemIssue(index=index, code=exc.code, message=exc.message))
-    return ParsedFeed(format="atom", items=tuple(items), issues=tuple(issues))
+    # Tombstones are direct children of the feed root and live in their own
+    # namespace; they are validated independently from regular entries.
+    tombstone_nodes = [node for node in list(root) if _is_tombstone(node)]
+    seen_refs: set[str] = set()
+    for index, node in enumerate(tombstone_nodes):
+        try:
+            marker = _parse_tombstone(node, index)
+        except ParseError as exc:
+            issues.append(ItemIssue(index=index, code=exc.code, message=exc.message))
+            continue
+        if marker.raw_ref in seen_refs:
+            issues.append(ItemIssue(
+                index=index, code="ATOM_TOMBSTONE_DUPLICATE_REF",
+                message=f"删除标记 {index} 的 ref 与同响应中的其他标记重复",
+            ))
+            continue
+        seen_refs.add(marker.raw_ref)
+        tombstones.append(marker)
+    return ParsedFeed(format="atom", items=tuple(items), issues=tuple(issues),
+                      tombstones=tuple(tombstones))
